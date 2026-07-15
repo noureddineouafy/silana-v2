@@ -76,6 +76,6 @@ let handler = async (m, { usedPrefix, command, text }) => {
 handler.help = ['yts'];
 handler.tags = ['downloader'];
 handler.command = /^(yts|youtubesearch)$/i;
-handler.limit = true;
+handler.limit = false;
 
 export default handler;
