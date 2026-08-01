@@ -1,111 +1,70 @@
-// instagram.com/noureddine_ouafy
+// ==========================================
+// Bot AI Plugin - Configured & Coded by: Hussein (Iraq)
+// Official Gemini API Integration (Lightweight & Fast)
+// ==========================================
+
 import fetch from 'node-fetch';
 
-const gemini = {
-  getNewCookie: async function () {
-    const r = await fetch("https://gemini.google.com/_/BardChatUi/data/batchexecute?rpcids=maGuAc&source-path=%2F&bl=boq_assistant-bard-web-server_20250814.06_p1&f.sid=-7816331052118000090&hl=en-US&_reqid=173780&rt=c", {
-      headers: { "content-type": "application/x-www-form-urlencoded;charset=UTF-8" },
-      body: "f.req=%5B%5B%5B%22maGuAc%22%2C%22%5B0%5D%22%2Cnull%2C%22generic%22%5D%5D%5D&",
-      method: "POST"
-    });
-    const cookieHeader = r.headers.get('set-cookie');
-    if (!cookieHeader) throw new Error('Failed to retrieve Gemini cookie.');
-    return cookieHeader.split(';')[0];
-  },
+const GEMINI_API_KEY = "AQ.Ab8RN6K_8f-mS2zcZwUnelfsJfZOz86XiyaV3YlmB0qYO4TVgA"; 
 
-  ask: async function (prompt, previousId = null) {
-    if (!prompt?.trim()) throw new Error("Invalid prompt.");
-
-    let resumeArray = null, cookie = null;
-    if (previousId) {
-      try {
-        const j = JSON.parse(atob(previousId));
-        resumeArray = j.newResumeArray;
-        cookie = j.cookie;
-      } catch {
-        previousId = null;
-      }
-    }
-
-    const headers = {
-      "content-type": "application/x-www-form-urlencoded;charset=UTF-8",
-      "x-goog-ext-525001261-jspb": "[1,null,null,null,\"9ec249fc9ad08861\",null,null,null,[4]]",
-      "cookie": cookie || await this.getNewCookie()
-    };
-
-    const b = [[prompt], ["en-US"], resumeArray];
-    const a = [null, JSON.stringify(b)];
-    const obj = { "f.req": JSON.stringify(a) };
-    const body = new URLSearchParams(obj);
-
-    const response = await fetch(`https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?bl=boq_assistant-bard-web-server_20250729.06_p0&f.sid=4206607810970164620&hl=en-US&_reqid=2813378&rt=c`, {
-      headers,
-      body,
-      method: 'POST'
-    });
-
-    if (!response.ok) throw new Error(`HTTP ${response.status} ${response.statusText}`);
-
-    const data = await response.text();
-    const match = data.matchAll(/^\d+\n(.+?)\n/gm);
-    const chunks = Array.from(match, m => m[1]);
-    let text, newResumeArray, found = false;
-
-    for (const chunk of chunks.reverse()) {
-      try {
-        const realArray = JSON.parse(chunk);
-        const parse1 = JSON.parse(realArray[0][2]);
-        if (parse1?.[4]?.[0]?.[1]?.[0]) {
-          newResumeArray = [...parse1[1], parse1[4][0][0]];
-          text = parse1[4][0][1][0].replace(/\*\*(.+?)\*\*/g, `*$1*`);
-          found = true;
-          break;
-        }
-      } catch {}
-    }
-
-    if (!found) throw new Error("Failed to parse Gemini response.");
-
-    const id = btoa(JSON.stringify({ newResumeArray, cookie: headers.cookie }));
-    return { text, id };
-  }
-};
-
-const geminiSessions = {};
+let globalAutoAi = false; // حالة التفعيل العامة
 
 let handler = async (m, { conn, text, usedPrefix, command }) => {
   if (!text) throw `*Example:* ${usedPrefix + command} on/off`;
 
-  const phone = m.sender.split('@')[0];
-  conn.autoGemini = conn.autoGemini || {};
-
   if (text === "on") {
-    conn.autoGemini[phone] = true;
-    m.reply("[ ✓ ] Auto AI mode enabled.");
+    globalAutoAi = true;
+    m.reply("[ ✓ ] Auto AI mode enabled (Official API + Private chats only).");
   } else if (text === "off") {
-    delete conn.autoGemini[phone];
+    globalAutoAi = false;
     m.reply("[ ✓ ] Auto AI mode disabled.");
   }
 };
 
-// 🧠 Auto AI reply logic
+// 🧠 Auto AI reply logic باستخدام الـ API الرسمي وبدون ثقل
 handler.before = async (m, { conn }) => {
-  conn.autoGemini = conn.autoGemini || {};
+  if (!globalAutoAi) return;
   if (m.isBaileys && m.fromMe) return;
   if (!m.text) return;
+  if (m.isGroup) return; // يمنع البوت من الرد بالجروبات لحماية رقمك
+  if (/^[.#/\\!]/.test(m.text)) return; // يتجاهل الأوامر الاعتيادية
 
-  const phone = m.sender.split('@')[0];
-  if (!conn.autoGemini[phone]) return;
-  if (/^[.#/\\!]/.test(m.text)) return;
+  if (!GEMINI_API_KEY) {
+    console.error("Gemini API Key is missing!");
+    return;
+  }
 
   try {
-    const prev = geminiSessions[m.sender];
-    const result = await gemini.ask(m.text, prev);
-    geminiSessions[m.sender] = result.id;
-    await conn.reply(m.chat, result.text, m);
+    // إظهار حالة جاري الكتابة لطابع بشري وحماية الحساب
+    await conn.sendPresenceUpdate('composing', m.chat);
+    
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        contents: [{
+          parts: [{ text: m.text }]
+        }]
+      })
+    });
+
+    const data = await response.json();
+
+    // التحقق من أن الاستجابة ناجحة من سيرفر جوجل
+    if (!response.ok) {
+      console.error("Gemini API Error Details:", data);
+      return;
+    }
+
+    const replyText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+    if (replyText) {
+      await conn.reply(m.chat, replyText, m);
+    }
   } catch (e) {
-    console.error(e);
-    m.reply("⚠️ Error while contacting Gemini AI. Please try again later.");
+    console.error("AI Catch Error:", e);
   }
 };
 
