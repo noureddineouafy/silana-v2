@@ -22,7 +22,7 @@ function toBoldUnicode(str) {
 const categoryColors = {
 	main: '🔵', ai: '🟣', downloader: '🟢', uploader: '🟢',
 	editor: '🟠', sticker: '🟡', tools: '⚪', infobot: '🔵',
-	group: '🟢', owner: '🔴',
+	group: '🟢', owner: '🔴', games: '🟤',
 }
 
 // ---------------- i18n ----------------
@@ -96,6 +96,7 @@ const handler = async (m, { conn, usedPrefix: _p, command, isOwner, args }) => {
 		sticker: { title: 'Sticker Menu', emoji: '🎟' },
 		tools: { title: 'Tools Menu', emoji: '🛠' },
 		infobot: { title: 'Info Menu', emoji: 'ℹ️' },
+		games: { title: 'Games Menu', emoji: '🎮' },
 		group: { title: 'Group Menu', emoji: '👥' },
 		owner: { title: 'Owner Menu', emoji: '👑' },
 	}
@@ -435,5 +436,4 @@ async function checkStatus() {
 
 	global.db.data.stats.statusCache = { checkedAt: Date.now(), result: resultText }
 	return resultText
-					  }
-													  
+}
