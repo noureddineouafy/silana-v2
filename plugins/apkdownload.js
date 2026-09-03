@@ -15,7 +15,7 @@ let handler = async (m, { conn, args }) => {
   try {
     const apiUrl = `https://api.nexoracle.com/downloader/apk`;
     const params = {
-      apikey: 'free_key@maher_apis',
+      apikey: process.env.NEXORACLE_API_KEY || 'free_key@maher_apis',
       q: appName
     };
 
