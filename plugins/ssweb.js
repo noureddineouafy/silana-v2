@@ -106,8 +106,35 @@ const ssweb = {
 		return { reqObj };
 	},
 
+	validateUrl(url) {
+		let parsed;
+		try {
+			parsed = new URL(url);
+		} catch {
+			throw Error('invalid URL');
+		}
+
+		if (!['http:', 'https:'].includes(parsed.protocol))
+			throw Error('only http/https URLs are allowed');
+
+		const host = parsed.hostname.toLowerCase();
+		const blockedHosts = ['localhost', '169.254.169.254', '::1'];
+		const privateIpPattern =
+			/^(127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|0\.0\.0\.0)/;
+
+		if (
+			blockedHosts.includes(host) ||
+			privateIpPattern.test(host) ||
+			host === '[::1]'
+		)
+			throw Error('URL points to a disallowed private/internal address');
+
+		return true;
+	},
+
 	async capture(url) {
 		if (!url) throw Error('URL parameter cannot be empty');
+		this.validateUrl(url);
 
 		const { cookie } = await this.getCookie();
 		const { reqObj } = await this.req(url, cookie);
