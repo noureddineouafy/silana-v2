@@ -26,7 +26,7 @@ export async function handler(chatUpdate) {
 
 		if (typeof m.text !== 'string') m.text = '';
 
-		const isROwner = [conn.decodeJid(global.conn.user.id), ...global.owner.map(([number]) => number)].map((v) => v.replace(/[^0-9]/g, '') + '@s.whatsapp.net').includes(m.sender);
+				const isROwner = [conn.decodeJid(global.conn.user.id), ...global.owner.map(([number]) => number)].map((v) => v.replace(/[^0-9]/g, '')).includes(m.sender.replace(/[^0-9]/g, ''));
 		const isOwner = isROwner || m.fromMe;
 		const isPrems = isROwner || db.data.users[m.sender]?.premiumTime > 0;
 
