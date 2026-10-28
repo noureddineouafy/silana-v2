@@ -192,10 +192,11 @@ export async function handler(chatUpdate) {
 					this.reply(m.chat, `[❗]Your limit has run out, please buy via *${usedPrefix}buy limit*`, m);
 					continue; // Limit habis
 				}
-				if (plugin.level > _user.level) {
-					this.reply(m.chat, `[💬] Level required ${plugin.level} to use this command\n*Your level:* ${_user.level} 📊`, m);
-					continue; // If the level has not been reached
-				}
+				if (plugin.level > (_user?.level || 0)) {
+	this.reply(m.chat, `[💬] Level required ${plugin.level} to use this command\n*Your level:* ${_user?.level || 0} 📊`, m);
+	continue; // If the level has not been reached
+}
+
 				let extra = {
 					match,
 					usedPrefix,
