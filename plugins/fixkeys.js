@@ -1,4 +1,4 @@
-// plugins/fixkeys.js — Encryption-key doctor for "Waiting for this message" (owner only) — fixkeys v7
+// plugins/fixkeys.js — Encryption-key doctor for "Waiting for this message" (owner only) — fixkeys v9
 //
 // v5 — ALL GROUPS, ALL SOCKETS, FULLY AUTOMATIC
 //   Everything in v4, and the periodic sweep now covers EVERY group of the
@@ -64,7 +64,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
-const VERSION = 'fixkeys v7'
+const VERSION = 'fixkeys v9'
 const digits = (s) => String(s || '').replace(/[^0-9]/g, '')
 
 // ---------------------------------------------------------------------------
@@ -235,12 +235,12 @@ async function sweepOnce(force) {
     } catch { return 0 }
 }
 globalThis.__fixkeysSweepNow = sweepOnce
-if (globalThis.__fixkeysSweepVersion !== 7) {
+if (globalThis.__fixkeysSweepVersion !== 9) {
     try { if (globalThis.__fixkeysSweepTimer) clearInterval(globalThis.__fixkeysSweepTimer) } catch {}
-    globalThis.__fixkeysSweepVersion = 7
+    globalThis.__fixkeysSweepVersion = 9
     globalThis.__fixkeysSweepTimer = setInterval(() => { if (globalThis.__fixkeysSweepNow) globalThis.__fixkeysSweepNow(false) }, SWEEP_MS)
-    if (!globalThis.__fixkeysInitialSweep7) {
-        globalThis.__fixkeysInitialSweep7 = true
+    if (!globalThis.__fixkeysInitialSweep9) {
+        globalThis.__fixkeysInitialSweep9 = true
         setTimeout(() => { if (globalThis.__fixkeysSweepNow) globalThis.__fixkeysSweepNow(false) }, 2 * 60 * 1000)
     }
 }
@@ -290,9 +290,9 @@ async function churnScan() {
     } catch { return 0 }
 }
 globalThis.__fixkeysChurnScan = churnScan
-if (globalThis.__fixkeysChurnVersion !== 7) {
+if (globalThis.__fixkeysChurnVersion !== 9) {
     try { if (globalThis.__fixkeysChurnTimer) clearInterval(globalThis.__fixkeysChurnTimer) } catch {}
-    globalThis.__fixkeysChurnVersion = 7
+    globalThis.__fixkeysChurnVersion = 9
     globalThis.__fixkeysChurnTimer = setInterval(() => { if (globalThis.__fixkeysChurnScan) globalThis.__fixkeysChurnScan() }, 20000)
 }
 
@@ -374,6 +374,31 @@ function baileysVersion() {
 // ---------------------------------------------------------------------------
 // Handler
 // ---------------------------------------------------------------------------
+function fullGuide(p) {
+    return (
+        `🩺 *${VERSION} — FULL GUIDE*\n\n` +
+        `*What the bot does BY ITSELF — no commands needed:*\n` +
+        `• Stores its outgoing messages, so a WhatsApp retry can resend a stuck message instead of leaving "Waiting for this message" (uses the getMessage line in main.js).\n` +
+        `• When a member joins, leaves, rejoins or changes number/device in any group, that group's key rotates automatically.\n` +
+        `• Every 12 hours it rotates the keys of ALL groups — main bot + every online sub-bot (first run ~2 minutes after start).\n` +
+        `• When one member's session starts looping (the console flood), it wipes and rebuilds that session by itself — max once per 30 min per member.\n\n` +
+        `*Commands (owner only):*\n` +
+        `• ${p} — this guide (in any chat, groups included).\n` +
+        `• ${p} group — inside a group: reset THIS group's keys now.\n` +
+        `• ${p} <phone> — repair ONE member: wipes their session, sends a DM probe, then refreshes the group key. Or just reply to the member's message with ${p}.\n` +
+        `• ${p} all — inside a group: group reset + report of members whose sessions look broken.\n` +
+        `• ${p} <groupJid> — reset a group from anywhere.\n` +
+        `• ${p} sweep — rotate the keys of ALL groups right now.\n` +
+        `• ${p} auto on|off — the 12h self-maintenance (default ON).\n` +
+        `• ${p} repair on|off — the automatic repair of looping sessions (default ON).\n` +
+        `• ${p} check — full diagnostics: versions, stored messages, coverage, who is flooding, repairs done.\n` +
+        `• ${p} help — this guide.\n\n` +
+        `*Good to know:*\n` +
+        `• "WhatsApp version not supported" on a member's message = the RECEIVER's WhatsApp is old — only updating their app fixes it, keys cannot.\n` +
+        `• A few "Closing session" lines in the console are normal self-healing; a non-stop flood from one member is what auto-repair handles.`
+    )
+}
+
 let handler = async (m, { conn, text, isOwner, usedPrefix, command }) => {
     if (!isOwner) return m.reply('⛔ This command is owner-only.')
     bindConn(conn)
@@ -397,6 +422,15 @@ let handler = async (m, { conn, text, isOwner, usedPrefix, command }) => {
         if (arg === 'off') globalThis.__fixkeysAuto = false
         else if (arg === 'on') globalThis.__fixkeysAuto = true
         return m.reply(`🤖 *Periodic key maintenance:* ${globalThis.__fixkeysAuto === false ? 'OFF' : 'ON'} — every 12h all group keys rotate by themselves, no restart, no command.\nUsage: ${usedPrefix + command} auto on|off`)
+    }
+    if (first === 'help') {
+        return m.reply(fullGuide(usedPrefix + command))
+    }
+    if (!raw && !quotedNum) {
+        // Bare command anywhere (groups included) shows the guide — the
+        // group reset itself lives behind `.fixkeys group`. A bare reply to
+        // a member's message still means member repair, so it is exempt.
+        return m.reply(fullGuide(usedPrefix + command))
     }
     if (first === 'repair') {
         const arg = (raw.split(/\s+/)[1] || '').toLowerCase()
@@ -517,17 +551,7 @@ let handler = async (m, { conn, text, isOwner, usedPrefix, command }) => {
 
     // ---------- GROUP MODE / ALL MODE ----------
     if (!groupJid) {
-        return m.reply(
-            `⚠️ Usage — ${VERSION}:\n` +
-            `• ${usedPrefix + command} — inside a group: reset the whole group\n` +
-            `• ${usedPrefix + command} <phone> — reset ONE member (or reply to their message with ${usedPrefix + command})\n` +
-            `• ${usedPrefix + command} all — inside a group: reset + report members at risk\n` +
-            `• ${usedPrefix + command} sweep — rotate the keys of ALL groups now (no restart)\n` +
-            `• ${usedPrefix + command} auto on|off — the 12h self-maintenance (default on)\n` +
-            `• ${usedPrefix + command} repair on|off — auto-repair of looping member sessions (default on)\n` +
-            `• ${usedPrefix + command} check — diagnostics\n` +
-            `• ${usedPrefix + command} <groupJid> — reset a group from anywhere`
-        )
+        return m.reply(fullGuide(usedPrefix + command))
     }
     const steps = [`🔑 *Key reset done for this group* — ${VERSION}`]
     await wipeGroupMemory(keys, groupJid, steps)
