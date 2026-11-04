@@ -1,7 +1,13 @@
-// doroos.js — دروس وفروض وامتحانات المغرب + تحميل مباشر (.doroos) — v4
+// doroos.js — دروس وفروض وامتحانات المغرب + تحميل مباشر (.doroos) — v7
+// v7: التصفح ولّى: المستوى ← المادة ← النوع (الدروس / التمارين /
+// الامتحانات والفروض / الكل) ← النتائج — المستعمل كيختار النوع قبل
+// ما يشوف النتائج، والأعداد في قائمة الأنواع حقيقية من نفس البيانات.
 // .doroos بوحدها كتفتح تصفح بالقوائم: المستوى ← المادة ← النتائج،
 // والأزرار عبر conn.sendButton ديال القاعدة (native flow) بحال menu.js،
 // مع احتياط الأرقام النصية في كل خطوة. والبحث النصي المباشر باقي خدام.
+// v5/v6: النتائج كتوصل كبطاقة AIRich غنية (نص منسق + جدول + مصادر)
+// — نفس بروتوكول ردود Meta AI — وقائمة sendButton للتحميل كترافقها
+// (اقتراحات AIRich لا تعمل خارج محادثات Meta AI). للمالك: .doroos rich on|off
 // ─────────────────────────────────────────────────────────────────────────────
 // بحث في مكتبة AlloSchool المغربية (دروس، تمارين، فروض، امتحانات
 // وطنية + التصحيح) لجميع المستويات، مع تحميل الـ PDF مباشرة في واتساب:
@@ -12,13 +18,16 @@
 //   (من بعد) رد بـ 1 أو 2 ... للتحميل
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { randomUUID, randomBytes } from 'crypto'
+
 const BASE = 'https://www.alloschool.com'
 const MAX_RESULTS = 20
 const MAX_PDF = 32 * 1024 * 1024
 const SESSION_TTL = 10 * 60 * 1000
 
 const sessions = new Map() // `${chat}|${sender}` -> { results, at }
-const browse = new Map() // `${chat}|${sender}` -> { step, levelKey, at }
+const browse = new Map() // `${chat}|${sender}` -> { step, levelKey, subject, at }
+const pools = new Map() // `${chat}|${sender}` -> { buckets, all, levelKey, subject, at }
 
 const LEVELS = [
     { key: 'p1', label: 'الأول ابتدائي', frag: 'الأول ابتدائي', cycle: 'prim', sec: '🎒 التعليم الابتدائي' },
@@ -101,6 +110,61 @@ async function searchSmart(query) {
     return searchAllo(query)
 }
 
+// ─── v7: أنواع المحتوى ────────────────────────────────────────────────
+// التصنيف من عنوان العنصر في AlloSchool: الامتحانات والفروض عندها
+// كلمات صريحة، التمارين حتى هي، والباقي (مواضيع الدروس والملخصات
+// والجذاذات) كيتحسب دروس.
+const CATS = [
+    { key: 'lessons', label: 'الدروس', icon: '📚' },
+    { key: 'exercises', label: 'التمارين', icon: '✏️' },
+    { key: 'exams', label: 'الامتحانات والفروض', icon: '📝' },
+    { key: 'all', label: 'الكل (مختلط)', icon: '🌐' },
+]
+
+function classify(title) {
+    const n = norm(title)
+    if (/امتحان|فرض|اختبار|مراقبه|مباراه|اولمبياد/.test(n)) return 'exams'
+    if (/تمارين|تمرين|سلسله|تدريب/.test(n)) return 'exercises'
+    return 'lessons'
+}
+
+function scoreByTokens(els, tokens) {
+    const scored = els.map(el => {
+        const t = norm(el.title)
+        let s = 0
+        for (const tok of tokens) if (t.includes(tok)) s++
+        return { el, s }
+    }).filter(x => tokens.length < 2 || x.s >= Math.min(2, tokens.length))
+    scored.sort((a, b) => b.s - a.s)
+    return scored.length ? scored.map(x => x.el) : els
+}
+
+// كيبني مكتبة (مادة + مستوى) مصنفة حسب النوع، من نفس محرك بحث v6.
+// التمارين كتتعزز ببحوث عبارات إضافية إلا كانت قليلة في المكتبة،
+// حيت AlloSchool كيخزن السلاسل الحقيقية تحت عناوين «سلسلة تمارين…».
+async function buildPool(subject, level) {
+    const query = `${subject} ${level.frag}`
+    const tokens = norm(query).split(' ').filter(w => w.length > 1)
+    const ranked = scoreByTokens(await searchSmart(query), tokens).slice(0, 300)
+    const buckets = { lessons: [], exercises: [], exams: [] }
+    for (const el of ranked) buckets[classify(el.title)].push(el)
+    if (buckets.exercises.length < 8) {
+        const seen = new Set(ranked.map(e => e.id))
+        for (const q of [`تمارين ${subject}`, `سلسلة تمارين ${subject}`, `تمارين محلولة ${subject}`]) {
+            try {
+                for (const el of scoreByTokens(await searchAllo(q), tokens)) {
+                    if (seen.has(el.id) || classify(el.title) !== 'exercises') continue
+                    seen.add(el.id)
+                    buckets.exercises.push(el)
+                    if (buckets.exercises.length >= 40) break
+                }
+            } catch {}
+            if (buckets.exercises.length >= 20) break
+        }
+    }
+    return { buckets, all: ranked }
+}
+
 function getSession(m) {
     const key = `${m.chat}|${m.sender}`
     const s = sessions.get(key)
@@ -139,6 +203,109 @@ async function deliverElement(conn, m, el) {
         fileName,
         caption: `📚 ${el.title}\n⚡ SILANA AI`,
     }, { quoted: m })
+}
+
+// ─── AIRich: بطاقة غنية ببروتوكول ردود Meta AI (unified response) ───
+// البنية مطابقة لما كيولدو Baileys forks المعروفة (JAPofc AIRich):
+// botForwardedMessage.richResponseMessage + sections بلا GenAI types،
+// وشهادات/توقيع verificationMetadata عشوائية الشكل (العميل لا يتحقق منها).
+function _cert(len) {
+    const b = randomBytes(len)
+    b[0] = 48; b[1] = 130
+    return b
+}
+function _layout(name, data, extra) {
+    return {
+        ...(extra || {}),
+        view_model: {
+            [Array.isArray(data) ? 'primitives' : 'primitive']: data,
+            __typename: `GenAI${name}LayoutViewModel`,
+        },
+    }
+}
+
+function richEnabled() {
+    try { return global.db.data.settings.doroosRich !== false } catch { return true }
+}
+
+async function sendRichResults(conn, m, usedPrefix, query, top, total) {
+    if (typeof conn.relayMessage !== 'function') throw new Error('rich: relayMessage غير متوفر')
+    const intro = `**نتائج «${query}»** 📚\nلقيت ${total} نتيجة في AlloSchool — هاهوما الأقرب ليك (الجدول في «See details»). قائمة التحميل في الرسالة اللي تحت 👇`
+    const header = ['#', 'الدرس']
+    const rows = top.map((el, i) => [String(i + 1), el.title.length > 44 ? el.title.slice(0, 44) + '…' : el.title])
+    const unifiedRows = [
+        { is_header: true, cells: header },
+        ...rows.map(r => ({ is_header: false, cells: r })),
+    ]
+    const sections = [
+        _layout('Single', { text: intro, __typename: 'GenAIMarkdownTextUXPrimitive' }),
+        _layout('Single', { rows: unifiedRows, __typename: 'GenAITableUXPrimitive' }),
+        _layout('Single', {
+            sources: [{
+                source_type: 'THIRD_PARTY',
+                source_display_name: 'AlloSchool',
+                source_subtitle: 'alloschool.com',
+                source_url: BASE,
+                favicon: { url: BASE + '/favicon.ico', mime_type: 'image/jpeg', width: 16, height: 16 },
+            }],
+            __typename: 'GenAISearchResultPrimitive',
+        }),
+        // ملاحظة: اقتراحات FollowUpSuggestion ديال AIRich ما كتخدمش خارج
+        // محادثات Meta AI (الضغط عليها ما كيرسل والو) — بلا بيها هنا،
+        // والتحميل كيتم بقائمة sendButton العادية اللي كترسل مع البطاقة.
+    ]
+    const responseId = randomUUID()
+    const msg = {
+        messageContextInfo: {
+            deviceListMetadata: {},
+            deviceListMetadataVersion: 2,
+            botMetadata: {
+                messageDisclaimerText: 'SILANA AI • دروس وفروض المغرب',
+                richResponseSourcesMetadata: { sources: [] },
+                botResponseId: responseId,
+                verificationMetadata: {
+                    proofs: [{
+                        certificateChain: [_cert(685), _cert(892)],
+                        version: 1,
+                        useCase: 1,
+                        signature: randomBytes(64),
+                    }],
+                },
+            },
+        },
+        botForwardedMessage: {
+            message: {
+                richResponseMessage: {
+                    messageType: 1,
+                    submessages: [
+                        { messageType: 2, messageText: intro.replace(/\*\*/g, '') },
+                        {
+                            messageType: 4,
+                            tableMetadata: {
+                                title: '',
+                                rows: [
+                                    { items: header, isHeading: true },
+                                    ...rows.map(r => ({ items: r })),
+                                ],
+                            },
+                        },
+                    ],
+                    unifiedResponse: {
+                        data: Buffer.from(JSON.stringify({ response_id: responseId, sections })).toString('base64'),
+                    },
+                    contextInfo: {
+                        isForwarded: true,
+                        forwardingScore: 1,
+                        forwardedAiBotMessageInfo: { botJid: '867051314767696@bot' },
+                        forwardOrigin: 4,
+                    },
+                },
+            },
+        },
+    }
+    const messageId = randomBytes(16).toString('hex').toUpperCase()
+    await conn.relayMessage(m.chat, msg, { messageId })
+    return true
 }
 
 function getBrowse(m) {
@@ -185,12 +352,63 @@ async function sendSubjects(conn, m, usedPrefix, level) {
     const subjects = SUBJECTS_BY_CYCLE[level.cycle]
     const sections = [{
         title: `مواد ${level.label}`,
-        rows: subjects.map((s, i) => ({ title: s, description: 'اضغط لعرض الدروس والفروض', id: `${usedPrefix}doroosgo sub ${level.key} ${i}` })),
+        rows: subjects.map((s, i) => ({ title: s, description: 'اضغط لاختيار النوع', id: `${usedPrefix}doroosgo sub ${level.key} ${i}` })),
     }]
     const body =
         `📚 *${level.label}* — اختار *المادة* 👇\n\n` +
         subjects.map((s, i) => `${i + 1}. ${s}`).join('\n')
     await sendList(conn, m, body, '📖 اختر المادة', sections)
+}
+
+// v7: خطوة اختيار النوع — كتبني المكتبة المصنفة وكتوري الأعداد الحقيقية
+async function sendCategories(conn, m, usedPrefix, level, subIdx) {
+    const subject = SUBJECTS_BY_CYCLE[level.cycle][subIdx]
+    await conn.reply(m.chat, `📚 *${subject}* — ${level.label}\nكنجمع ليك الدروس والتمارين والامتحانات… ⏳`, m)
+    let pool = null
+    try { pool = await buildPool(subject, level) } catch {}
+    if (!pool) return await runSearch(conn, m, usedPrefix, `${subject} ${level.frag}`)
+    const key = `${m.chat}|${m.sender}`
+    pools.set(key, { ...pool, levelKey: level.key, subject, at: Date.now() })
+    browse.set(key, { step: 'cat', levelKey: level.key, subject, at: Date.now() })
+    const counts = {
+        lessons: pool.buckets.lessons.length,
+        exercises: pool.buckets.exercises.length,
+        exams: pool.buckets.exams.length,
+        all: pool.all.length,
+    }
+    const sections = [{
+        title: `${subject} — ${level.label}`,
+        rows: CATS.map(c => ({
+            title: `${c.icon} ${c.label}`,
+            description: `${counts[c.key]} نتيجة — اضغط للعرض`,
+            id: `${usedPrefix}doroosgo cat ${level.key} ${subIdx} ${c.key}`,
+        })),
+    }]
+    const body =
+        `📚 *${subject}* — ${level.label}\n\n` +
+        `شنو بغيتي؟ اختار *النوع* 👇\n\n` +
+        CATS.map((c, i) => `${i + 1}. ${c.icon} ${c.label} (${counts[c.key]})`).join('\n')
+    await sendList(conn, m, body, '🗂️ اختر النوع', sections)
+}
+
+// v7: عرض نتائج نوع واحد من المكتبة المصنفة
+async function runCategory(conn, m, usedPrefix, level, subject, catKey) {
+    const key = `${m.chat}|${m.sender}`
+    let p = pools.get(key)
+    if (!p || Date.now() - p.at > SESSION_TTL || p.levelKey !== level.key || p.subject !== subject) {
+        try { p = { ...(await buildPool(subject, level)), levelKey: level.key, subject, at: Date.now() }; pools.set(key, p) }
+        catch { return await runSearch(conn, m, usedPrefix, `${subject} ${level.frag}`) }
+    }
+    const cat = CATS.find(c => c.key === catKey) || CATS[3]
+    const list = cat.key === 'all' ? p.all : p.buckets[cat.key]
+    if (!list.length) {
+        browse.set(key, { step: 'cat', levelKey: level.key, subject, at: Date.now() })
+        return conn.reply(m.chat,
+            `😕 ما لقيت حتى نتيجة في *${cat.label}* لـ${subject} (${level.label}) في فهرس AlloSchool.\n` +
+            `جرب نوع آخر بالأرقام 1-4، أو رجع للمادة بـ .doroos`, m)
+    }
+    const label = `${subject} — ${level.label} — ${cat.label}`
+    return await presentResults(conn, m, usedPrefix, label, list.slice(0, MAX_RESULTS), list.length)
 }
 
 async function runSearch(conn, m, usedPrefix, query) {
@@ -202,20 +420,16 @@ async function runSearch(conn, m, usedPrefix, query) {
             `جرب غير المادة بوحدها، أو بدل الصياغة (مثال: «الفيزياء والكيمياء» بدل «الفيزياء»).`, m)
     }
     const tokens = norm(query).split(' ').filter(w => w.length > 1)
-    const scored = all.map(el => {
-        const t = norm(el.title)
-        let score = 0
-        for (const tok of tokens) if (t.includes(tok)) score++
-        return { el, score }
-    }).filter(x => tokens.length < 2 || x.score >= Math.min(2, tokens.length))
-    scored.sort((a, b) => b.score - a.score)
-    const top = (scored.length ? scored : all.map(el => ({ el, score: 0 }))).slice(0, MAX_RESULTS).map(x => x.el)
+    const top = scoreByTokens(all, tokens).slice(0, MAX_RESULTS)
+    return await presentResults(conn, m, usedPrefix, query, top, all.length)
+}
 
+async function presentResults(conn, m, usedPrefix, query, top, total) {
     sessions.set(`${m.chat}|${m.sender}`, { results: top, at: Date.now() })
     browse.delete(`${m.chat}|${m.sender}`)
 
     const body =
-        `📚 *نتائج «${query}»* (${all.length} نتيجة — هاهوما الأقرب):\n\n` +
+        `📚 *نتائج «${query}»* (${total} نتيجة — هاهوما الأقرب):\n\n` +
         top.map((el, i) => `${i + 1}. ${el.title}`).join('\n') +
         `\n\n📥 *للتحميل:* اضغط زر «تحميل درس» واختار، أو رد برقم الدرس.`
     const mkRow = (el, i) => ({
@@ -225,12 +439,30 @@ async function runSearch(conn, m, usedPrefix, query) {
     })
     const sections = [{ title: 'اختر الدرس للتحميل (1-10)', rows: top.slice(0, 10).map(mkRow) }]
     if (top.length > 10) sections.push({ title: 'المزيد (11-20)', rows: top.slice(10).map((el, j) => mkRow(el, j + 10)) })
-    await sendList(conn, m, body, '📥 تحميل درس', sections)
+    // v6: بطاقة AIRich للعرض (جدول+مصادر) + قائمة التحميل العادية معها،
+    // لأن اقتراحات AIRich لا تعمل خارج محادثات Meta AI. إلا فشلت البطاقة
+    // كترجع القائمة بوحدها بالنص الكامل.
+    let richOk = false
+    if (richEnabled()) {
+        try { await sendRichResults(conn, m, usedPrefix, query, top, total); richOk = true } catch {}
+    }
+    if (richOk) {
+        await sendList(conn, m, '📥 *للتحميل:* اختار الدرس من القائمة، أو رد برقمو.', '📥 تحميل درس', sections)
+    } else {
+        await sendList(conn, m, body, '📥 تحميل درس', sections)
+    }
 }
 
-let handler = async (m, { conn, text, args, usedPrefix, command }) => {
+let handler = async (m, { conn, text, args, usedPrefix, command, isOwner }) => {
     const query = (text || '').trim()
     try {
+
+    // للمالك: تشغيل/إيقاف بطاقة AIRich
+    if (command === 'doroos' && args[0] === 'rich' && (args[1] === 'on' || args[1] === 'off')) {
+        if (!isOwner) return conn.reply(m.chat, '🔒 هاد الأمر للمالك فقط.', m)
+        global.db.data.settings.doroosRich = args[1] === 'on'
+        return conn.reply(m.chat, `🎴 بطاقة AIRich للنتائج: *${args[1] === 'on' ? 'مشغلة' : 'موقفة'}*`, m)
+    }
 
     // تنقل بالقوائم: .doroosgo lv <key> | .doroosgo sub <key> <idx>
     if (command === 'doroosgo') {
@@ -241,7 +473,12 @@ let handler = async (m, { conn, text, args, usedPrefix, command }) => {
         if (args[0] === 'sub') {
             const level = LEVELS.find(l => l.key === args[1])
             const subject = level && SUBJECTS_BY_CYCLE[level.cycle][parseInt(args[2])]
-            if (level && subject) return await runSearch(conn, m, usedPrefix, `${subject} ${level.frag}`)
+            if (level && subject) return await sendCategories(conn, m, usedPrefix, level, parseInt(args[2]))
+        }
+        if (args[0] === 'cat') {
+            const level = LEVELS.find(l => l.key === args[1])
+            const subject = level && SUBJECTS_BY_CYCLE[level.cycle][parseInt(args[2])]
+            if (level && subject) return await runCategory(conn, m, usedPrefix, level, subject, args[3])
         }
         return await sendLevels(conn, m, usedPrefix)
     }
@@ -269,7 +506,12 @@ let handler = async (m, { conn, text, args, usedPrefix, command }) => {
         if (b && b.step === 'subject') {
             const level = LEVELS.find(l => l.key === b.levelKey)
             const subject = level && SUBJECTS_BY_CYCLE[level.cycle][n - 1]
-            if (level && subject) return await runSearch(conn, m, usedPrefix, `${subject} ${level.frag}`)
+            if (level && subject) return await sendCategories(conn, m, usedPrefix, level, n - 1)
+        }
+        if (b && b.step === 'cat') {
+            const level = LEVELS.find(l => l.key === b.levelKey)
+            const cat = CATS[n - 1]
+            if (level && b.subject && cat) return await runCategory(conn, m, usedPrefix, level, b.subject, cat.key)
         }
         const s = getSession(m)
         if (s) {
@@ -295,9 +537,8 @@ let handler = async (m, { conn, text, args, usedPrefix, command }) => {
 }
 
 handler.help = ['doroos']
-handler.tags = ['morocco']
+handler.tags = ['search', 'tools']
 handler.command = /^(doroos|دروس|فروض|دراسة|doroosdl|doroosgo)$/i
 handler.limit = false
 
 export default handler
-          
