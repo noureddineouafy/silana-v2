@@ -1,7 +1,7 @@
 /**
  * dlpack.js — Multi-platform downloader pack for Silana v2 (ChiiMD base, Baileys ESM)
  *
- * One plugin, nine downloaders — every command starts with "dl-":
+ * One plugin, twelve downloaders — every command starts with "dl-":
  *   .dl           → menu of the pack (with a working example for each command)
  *   .dl-reddit    <reddit post link | v.redd.it link>   video (audio merged), images, gifs
  *   .dl-sc        <soundcloud track link>               MP3 audio
@@ -12,6 +12,9 @@
  *   .dl-streamable <streamable link>                    video
  *   .dl-kwai      <kwai video link>                     video
  *   .dl-rumble    <rumble link>                         video
+ *   .dl-pin       <pinterest pin link>                  photo or video of the pin
+ *   .dl-mf        <mediafire file link>                 any public file
+ *   .dl-st        <streamtape video link>               video
  *
  * v3: Dailymotion and Bilibili were REMOVED — both platforms hard-block
  * server IPs (DM stream CDN 403, Bilibili anti-bot 412), confirmed live.
@@ -379,6 +382,139 @@ async function dlRumble(conn, m, url) {
     return sendByType(conn, m, out, 'video/mp4', '🎬 ' + title)
 }
 
+/* ---------------- Pinterest (photos + videos) ---------------- */
+
+async function dlPin(conn, m, url) {
+    if (!/pinterest\.[a-z.]+\/pin\/|pin\.it\//i.test(url)) throw new Error('bad-link: not a Pinterest pin link')
+    const r = await fetch(url, { headers: { 'User-Agent': UA }, redirect: 'follow', signal: AbortSignal.timeout(30000) })
+    if (!r.ok) throw new Error('pinterest HTTP ' + r.status)
+    const html = (await r.text()).replace(/\\\//g, '/')
+    const title = cleanName(html.match(/"title"\s*:\s*"([^"]{3,120})"/)?.[1], 'Pinterest pin')
+    // Video pins: progressive MP4s are embedded in the page — take the best resolution
+    const mp4s = [...new Set([...html.matchAll(/https:\/\/v\d\.pinimg\.com\/videos\/[^"'\s]+\.mp4/g)].map(x => x[0]))]
+    if (mp4s.length) {
+        const score = u => { const mm = u.match(/(\d{3,4})p/); return mm ? +mm[1] : 0 }
+        mp4s.sort((a, b) => score(b) - score(a))
+        const out = path.join(TMPDIR, `pin-${stamp()}.mp4`)
+        await downloadToFile(mp4s[0], out)
+        return sendByType(conn, m, out, 'video/mp4', '📌 ' + title)
+    }
+    const m3u8 = html.match(/https:\/\/v\d\.pinimg\.com\/videos\/[^"'\s]+\.m3u8/)?.[0]
+    if (m3u8) {
+        const out = path.join(TMPDIR, `pin-${stamp()}.mp4`)
+        await ffmpeg(['-user_agent', UA, '-i', m3u8, '-c', 'copy', out], 900000)
+        if (!fs.existsSync(out) || fs.statSync(out).size < 10000) throw new Error('pinterest: empty video output')
+        return sendByType(conn, m, out, 'video/mp4', '📌 ' + title)
+    }
+    // Photo pins: the pin's own image is the one published in the most sizes
+    const groups = {}
+    for (const x of html.matchAll(/https:\/\/i\.pinimg\.com\/(originals|736x|564x|474x|236x)\/([0-9a-f]{2}\/[0-9a-f]{2}\/[0-9a-f]{2}\/[0-9a-f]+\.(?:jpg|jpeg|png|webp))/g)) {
+        if (!groups[x[2]]) groups[x[2]] = {}
+        groups[x[2]][x[1]] = x[0]
+    }
+    const best = Object.values(groups).sort((a, b) => Object.keys(b).length - Object.keys(a).length)[0]
+    const img = best?.originals || best?.['736x'] || (best && Object.values(best)[0])
+    if (!img) throw new Error('pinterest: no photo or video found on this pin')
+    const out = path.join(TMPDIR, `pin-${stamp()}` + (path.extname(new URL(img).pathname) || '.jpg'))
+    await downloadToFile(img, out)
+    return sendByType(conn, m, out, 'image/jpeg', '📌 ' + title)
+}
+
+// Streaming download for CDNs whose connections close dirtily (MediaFire's
+// servers + some proxies cut the final bytes, which makes strict fetch reads
+// fail with a content-length mismatch even though the file arrived complete).
+// Accepts the file when the stream ends cleanly, or when the byte count
+// matches the expected total.
+async function downloadStream(url, file, headers = {}, expectedTotal = 0) {
+    ensureTmp()
+    let got = 0
+    let total = expectedTotal || 0
+    const ws = fs.createWriteStream(file)
+    try {
+        for (let round = 0; round < 80; round++) {
+            const r = await fetch(url, { headers: { 'User-Agent': UA, ...headers, ...(got ? { 'Range': 'bytes=' + got + '-' } : {}) }, redirect: 'follow', signal: AbortSignal.timeout(180000) })
+            if (!r.ok && r.status !== 206) throw new Error('HTTP ' + r.status + ' from ' + new URL(url).host)
+            if (got && r.status === 200) throw new Error('server does not support resume — download aborted midway')
+            if (!total) total = +(r.headers.get('content-range')?.split('/')[1] || r.headers.get('content-length') || 0)
+            if (total > MAX_BYTES) throw new Error(`file too large (${(total / 1048576).toFixed(0)} MB, cap 95 MB)`)
+            const reader = r.body.getReader()
+            let roundErr = null
+            try {
+                for (;;) {
+                    const { done, value } = await reader.read()
+                    if (done) break
+                    got += value.length
+                    if (got > MAX_BYTES) throw new Error('file too large (over 95 MB cap)')
+                    await new Promise((res, rej) => ws.write(value, e => (e ? rej(e) : res())))
+                }
+            } catch (e) { if (/too large/.test(e.message)) throw e; roundErr = e }
+            if (!roundErr && (!total || got >= total)) break   // clean finish
+            if (roundErr && !total) throw roundErr              // dirty close, size unknown — cannot verify
+            if (total && got >= total) break                    // all bytes arrived despite the dirty close
+            // otherwise: loop and resume from `got` with a Range request
+        }
+    } finally { await new Promise(res => ws.end(res)) }
+    if (total && got !== total) throw new Error(`incomplete download (${got}/${total} bytes)`)
+    if (!got) throw new Error('empty download')
+    return got
+}
+
+/* ---------------- MediaFire ---------------- */
+
+const MF_MIME = { '.mp4': 'video/mp4', '.mkv': 'video/x-matroska', '.mp3': 'audio/mpeg', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp', '.gif': 'image/gif', '.pdf': 'application/pdf', '.zip': 'application/zip', '.rar': 'application/vnd.rar', '.txt': 'text/plain' }
+
+async function dlMf(conn, m, url) {
+    if (!/mediafire\.com\/file\//i.test(url)) throw new Error('bad-link: not a MediaFire file link')
+    const r = await fetch(url, { headers: { 'User-Agent': UA }, redirect: 'follow', signal: AbortSignal.timeout(30000) })
+    if (!r.ok) throw new Error('mediafire HTTP ' + r.status)
+    const html = await r.text()
+    const direct = html.match(/id="downloadButton"[^>]*href="([^"]+)"/)?.[1] || html.match(/href="(https:\/\/download\d*\.mediafire\.com\/[^"]+)"/)?.[1]
+    if (!direct) throw new Error('mediafire: download button not found (file removed/private, or a folder link)')
+    let fname = html.match(/<div class="filename">([^<]+)<\/div>/)?.[1]?.trim() || ''
+    if (!fname) { try { fname = decodeURIComponent(new URL(url).pathname.split('/').filter(Boolean)[2] || '') } catch {} }
+    fname = cleanName(fname, 'MediaFire file')
+    const ext = path.extname(fname).toLowerCase()
+    const directUrl = direct.replace(/&amp;/g, '&')
+    // Learn the exact size up-front (headers only) so a dirty connection
+    // close can be told apart from a truncated file.
+    let total = 0
+    try { const hr = await fetch(directUrl, { headers: { 'User-Agent': UA, 'Range': 'bytes=0-0' }, signal: AbortSignal.timeout(20000) }); total = +(hr.headers.get('content-range')?.split('/')[1] || 0); if (hr.body) hr.body.cancel().catch(() => {}) } catch {}
+    const tmp = path.join(TMPDIR, `mf-${stamp()}.bin`)
+    await downloadStream(directUrl, tmp, {}, total)
+    const target = path.join(TMPDIR, fname || `mediafire-${stamp()}.bin`)
+    fs.renameSync(tmp, target)
+    return sendByType(conn, m, target, MF_MIME[ext] || 'application/octet-stream', '💾 ' + fname)
+}
+
+/* ---------------- Streamtape ---------------- */
+
+async function dlSt(conn, m, url) {
+    const idm = url.match(/streamtape\.(?:com|to|net|xyz)\/(?:v|e)\/([A-Za-z0-9]+)/i)
+    if (!idm) throw new Error('bad-link: not a Streamtape video link')
+    const r = await fetch(url, { headers: { 'User-Agent': UA }, redirect: 'follow', signal: AbortSignal.timeout(30000) })
+    if (!r.ok) throw new Error('streamtape HTTP ' + r.status)
+    const html = await r.text()
+    // The watch page assembles the real link in a script: a static prefix plus a
+    // junk-padded query string trimmed by a chain of .substring(n) calls.
+    const s = html.match(/robotlink'\)\.innerHTML\s*=\s*'([^']*)'\s*\+\s*\('([^']*)'\)((?:\.substring\(\d+\))+)/)
+    let full = ''
+    if (s) {
+        let tail = s[2]
+        for (const n of s[3].match(/\d+/g)) tail = tail.substring(+n)
+        full = (s[1].startsWith('//') ? 'https:' + s[1] : s[1]) + tail
+    } else {
+        const plain = html.match(/(?:https?:)?\/\/streamtape\.(?:com|to)\/get_video\?id=[^"'\s<]+/)?.[0]
+        if (plain) full = plain.startsWith('//') ? 'https:' + plain : plain
+    }
+    if (!full) throw new Error('streamtape: could not assemble the download link (page layout changed or video removed)')
+    let fname = ''
+    try { fname = decodeURIComponent(new URL(url).pathname.split('/').filter(Boolean)[2] || '') } catch {}
+    const title = cleanName(fname.replace(/\.mp4$/i, ''), 'Streamtape video')
+    const out = path.join(TMPDIR, `st-${stamp()}.mp4`)
+    await downloadToFile(full, out, { 'Referer': url })
+    return sendByType(conn, m, out, 'video/mp4', '🎬 ' + title)
+}
+
 /* ---------------- Handler ---------------- */
 
 const SOURCES = {
@@ -391,6 +527,9 @@ const SOURCES = {
     'dl-streamable': { fn: dlStreamable, label: 'Streamable', need: 'a Streamable link', example: 'https://streamable.com/aqbjxq' },
     'dl-kwai': { fn: dlKwai, label: 'Kwai', need: 'a Kwai video link', example: 'https://k.kwai.com/p/Ph9CfDIO' },
     'dl-rumble': { fn: dlRumble, label: 'Rumble', need: 'a Rumble video link', example: 'https://rumble.com/vcld79-the-right-view-with-president-donald-j-trump-and-lara-trump.html' },
+    'dl-pin': { fn: dlPin, label: 'Pinterest', need: 'a Pinterest pin link (photo or video)', example: 'https://www.pinterest.com/pin/baby-video--17099673581133973/' },
+    'dl-mf': { fn: dlMf, label: 'MediaFire', need: 'a MediaFire file link', example: 'https://www.mediafire.com/file/4ba0oemf7sd39k9/UQMG_JTW_Sample_MissionPack_2.zip/file' },
+    'dl-st': { fn: dlSt, label: 'Streamtape', need: 'a Streamtape video link', example: 'https://streamtape.com/v/m7XGwwGRM6HbK9Y/VID-20251205-WA0067.mp4' },
 }
 
 // Busy lock per user, with a 10-minute expiry so a hung job can never
@@ -408,11 +547,11 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
     const cmd = String(command || '').toLowerCase()
     if (cmd === 'dl') {
         const lines = Object.entries(SOURCES).map(([c, s]) =>
-            `• ${usedPrefix}${c} <link> — ${s.label}\n   ↳ try it: ${usedPrefix}${c} ${s.example}`).join('\n')
+            `• ${usedPrefix}${c} <link> — ${s.label}\n   ↳ ` + (s.example ? `try it: ${usedPrefix}${c} ${s.example}` : `send any ${s.label} link`)).join('\n')
         const names = Object.values(SOURCES).map(s => s.label)
         const nameList = names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1]
         return conn.reply(m.chat,
-            `📥 *Silana DL Pack* v3.1\n` +
+            `📥 *Silana DL Pack* v4.1\n` +
             `With these commands you can download from ${names.length} platforms: ${nameList}.\n\n` +
             `Every command below has a working example — copy it to test the feature yourself:\n\n` +
             lines + `\n\nMax file size: 95 MB.`, m)
@@ -421,7 +560,7 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
     if (!src) return
     const url = String(text || '').trim().split(/\s+/)[0] || (m.quoted?.text ? String(m.quoted.text).match(/https?:\/\/\S+/)?.[0] : '')
     if (!url || !/^https?:\/\//i.test(url)) {
-        return conn.reply(m.chat, `📥 Usage: ${usedPrefix + cmd} <link>\nSend ${src.need}.\nWorking example — try it: ${usedPrefix + cmd} ${src.example}`, m)
+        return conn.reply(m.chat, `📥 Usage: ${usedPrefix + cmd} <link>\nSend ${src.need}.` + (src.example ? `\nWorking example — try it: ${usedPrefix + cmd} ${src.example}` : ''), m)
     }
     if (isBusy(m.sender)) return conn.reply(m.chat, '⏳ A download is already running for you — wait for it to finish.', m)
     busyUsers.set(m.sender, Date.now())
@@ -441,7 +580,7 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
         else if (raw.includes('gdrive:')) friendly = '❌ ' + raw + ' Make sure the file is shared as "Anyone with the link".'
         else if (raw.includes('telegram:')) friendly = '❌ ' + raw
         else if (raw.includes('soundcloud:')) friendly = '❌ ' + raw
-        else if (/^(vimeo|twitch|streamable|kwai|rumble):/.test(raw)) friendly = '❌ ' + raw
+        else if (/^(vimeo|twitch|streamable|kwai|rumble|pinterest|mediafire|streamtape):/.test(raw)) friendly = '❌ ' + raw
         return conn.reply(m.chat, friendly + (isOwner ? `\n🔧 Owner details: ${raw.slice(0, 180)}` : ''), m)
     } finally {
         busyUsers.delete(m.sender)
@@ -450,9 +589,9 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
     }
 }
 
-handler.help = ['dl', 'dl-reddit', 'dl-sc', 'dl-gdrive', 'dl-tg', 'dl-vimeo', 'dl-twitch', 'dl-streamable', 'dl-kwai', 'dl-rumble']
+handler.help = ['dl', 'dl-reddit', 'dl-sc', 'dl-gdrive', 'dl-tg', 'dl-vimeo', 'dl-twitch', 'dl-streamable', 'dl-kwai', 'dl-rumble', 'dl-pin', 'dl-mf', 'dl-st']
 handler.tags = ['downloader']
-handler.command = /^(dl|dl-reddit|dl-sc|dl-gdrive|dl-tg|dl-vimeo|dl-twitch|dl-streamable|dl-kwai|dl-rumble)$/i
+handler.command = /^(dl|dl-reddit|dl-sc|dl-gdrive|dl-tg|dl-vimeo|dl-twitch|dl-streamable|dl-kwai|dl-rumble|dl-pin|dl-mf|dl-st)$/i
 handler.limit = false
 
 export default handler
