@@ -1,4 +1,4 @@
-// plugins/fixkeys.js — Encryption-key doctor for "Waiting for this message" (owner only) — fixkeys v5
+// plugins/fixkeys.js — Encryption-key doctor for "Waiting for this message" (owner only) — fixkeys v7
 //
 // v5 — ALL GROUPS, ALL SOCKETS, FULLY AUTOMATIC
 //   Everything in v4, and the periodic sweep now covers EVERY group of the
@@ -64,7 +64,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
-const VERSION = 'fixkeys v5'
+const VERSION = 'fixkeys v7'
 const digits = (s) => String(s || '').replace(/[^0-9]/g, '')
 
 // ---------------------------------------------------------------------------
@@ -125,6 +125,40 @@ function bindConn(conn) {
                 }
             }
         }
+
+        // Session-churn watcher (v6): count every session record write per
+        // peer, so `.fixkeys check` can NAME the peer whose session is being
+        // rebuilt in a loop (the console "Closing session" flood) — this
+        // works with any auth adapter, file-based or database-based alike.
+        try {
+            const ks = conn.authState && conn.authState.keys
+            if (ks && typeof ks.set === 'function' && !conn.__fixkeysKeyWatch) {
+                conn.__fixkeysKeyWatch = true
+                const label = conn.isSerbot ? 'sub-' + (conn.serbotPhone || '?') : 'main'
+                const origSet = ks.set.bind(ks)
+                ks.set = async (data) => {
+                    try {
+                        if (!globalThis.__fixkeysKeyStats) globalThis.__fixkeysKeyStats = new Map()
+                        const stats = globalThis.__fixkeysKeyStats
+                        const now = Date.now()
+                        for (const [cat, entries] of Object.entries(data || {})) {
+                            if (cat !== 'session' || !entries) continue
+                            for (const id of Object.keys(entries)) {
+                                const k = label + '|' + id
+                                let rec = stats.get(k)
+                                if (Array.isArray(rec)) rec = { times: rec, conn: null, lastRepair: 0 }
+                                if (!rec) { rec = { times: [], conn: null, lastRepair: 0 }; }
+                                rec.conn = conn
+                                rec.times.push(now)
+                                if (rec.times.length > 300) rec.times.splice(0, rec.times.length - 300)
+                                stats.set(k, rec)
+                            }
+                        }
+                    } catch {}
+                    return origSet(data)
+                }
+            }
+        } catch {}
 
         if (!conn.__fixkeysAutoRotate && conn.ev && typeof conn.ev.on === 'function') {
             conn.__fixkeysAutoRotate = true
@@ -201,14 +235,65 @@ async function sweepOnce(force) {
     } catch { return 0 }
 }
 globalThis.__fixkeysSweepNow = sweepOnce
-if (globalThis.__fixkeysSweepVersion !== 5) {
+if (globalThis.__fixkeysSweepVersion !== 7) {
     try { if (globalThis.__fixkeysSweepTimer) clearInterval(globalThis.__fixkeysSweepTimer) } catch {}
-    globalThis.__fixkeysSweepVersion = 5
+    globalThis.__fixkeysSweepVersion = 7
     globalThis.__fixkeysSweepTimer = setInterval(() => { if (globalThis.__fixkeysSweepNow) globalThis.__fixkeysSweepNow(false) }, SWEEP_MS)
-    if (!globalThis.__fixkeysInitialSweep5) {
-        globalThis.__fixkeysInitialSweep5 = true
+    if (!globalThis.__fixkeysInitialSweep7) {
+        globalThis.__fixkeysInitialSweep7 = true
         setTimeout(() => { if (globalThis.__fixkeysSweepNow) globalThis.__fixkeysSweepNow(false) }, 2 * 60 * 1000)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Auto-repair (v7): when ONE peer's session is rebuilt over and over (the
+// console "Closing session" flood), wipe that session record automatically
+// so it rebuilds ONCE, clean — for every member, on every socket, with no
+// owner command. Guards: >=12 rebuilds within 3 minutes, at most one repair
+// per peer per 30 minutes, at most 20 repairs per hour overall, and a
+// healthy mass-rebuild wave (each peer rebuilding once or twice) never
+// reaches the threshold.
+// ---------------------------------------------------------------------------
+async function churnScan() {
+    try {
+        if (globalThis.__fixkeysAutoRepair === false) return 0
+        const stats = globalThis.__fixkeysKeyStats
+        if (!stats) return 0
+        if (!globalThis.__fixkeysAutoRepairs) globalThis.__fixkeysAutoRepairs = []
+        const reps = globalThis.__fixkeysAutoRepairs
+        const now = Date.now()
+        const hourAgo = now - 3600 * 1000
+        while (reps.length && reps[0].at < now - 24 * 3600 * 1000) reps.shift()
+        if (reps.filter((r) => r.at >= hourAgo).length >= 20) return 0
+        let repaired = 0
+        for (const [k, rec0] of stats.entries()) {
+            const rec = Array.isArray(rec0) ? { times: rec0, conn: null, lastRepair: 0 } : rec0
+            if (!rec || !rec.conn) continue
+            const recent = rec.times.filter((t) => t >= now - 3 * 60 * 1000).length
+            if (recent < 12) continue
+            if (now - (rec.lastRepair || 0) < 30 * 60 * 1000) continue
+            const keys = rec.conn.authState && rec.conn.authState.keys
+            if (!keys || typeof keys.set !== 'function') continue
+            const id = k.split('|').slice(1).join('|')
+            try {
+                await keys.set({ session: { [id]: null } })
+                rec.times = []
+                rec.lastRepair = now
+                stats.set(k, rec)
+                reps.push({ k, at: now })
+                repaired++
+                try { console.log('[fixkeys] auto-repaired looping session:', k) } catch {}
+            } catch {}
+            if (reps.filter((r) => r.at >= hourAgo).length >= 20) break
+        }
+        return repaired
+    } catch { return 0 }
+}
+globalThis.__fixkeysChurnScan = churnScan
+if (globalThis.__fixkeysChurnVersion !== 7) {
+    try { if (globalThis.__fixkeysChurnTimer) clearInterval(globalThis.__fixkeysChurnTimer) } catch {}
+    globalThis.__fixkeysChurnVersion = 7
+    globalThis.__fixkeysChurnTimer = setInterval(() => { if (globalThis.__fixkeysChurnScan) globalThis.__fixkeysChurnScan() }, 20000)
 }
 
 // ---------------------------------------------------------------------------
@@ -313,6 +398,12 @@ let handler = async (m, { conn, text, isOwner, usedPrefix, command }) => {
         else if (arg === 'on') globalThis.__fixkeysAuto = true
         return m.reply(`🤖 *Periodic key maintenance:* ${globalThis.__fixkeysAuto === false ? 'OFF' : 'ON'} — every 12h all group keys rotate by themselves, no restart, no command.\nUsage: ${usedPrefix + command} auto on|off`)
     }
+    if (first === 'repair') {
+        const arg = (raw.split(/\s+/)[1] || '').toLowerCase()
+        if (arg === 'off') globalThis.__fixkeysAutoRepair = false
+        else if (arg === 'on') globalThis.__fixkeysAutoRepair = true
+        return m.reply(`🛠️ *Auto-repair of broken sessions:* ${globalThis.__fixkeysAutoRepair === false ? 'OFF' : 'ON'} — when any member's session starts looping, the bot wipes and rebuilds it by itself (max once per 30 min per member). Usage: ${usedPrefix + command} repair on|off`)
+    }
     if (first === 'sweep') {
         const done = await sweepOnce(true)
         return m.reply(done ? `🧹 *Key sweep done* — distribution memory rotated for ${done} group(s) across the main bot + online sub-bots. The next message in each group re-distributes the key to every current device.` : '🧹 *Key sweep:* no groups could be rotated right now (no participating list and no group seen yet).')
@@ -339,6 +430,24 @@ let handler = async (m, { conn, text, isOwner, usedPrefix, command }) => {
         let subsOnline = 0
         try { subsOnline = globalThis.__serbots ? [...globalThis.__serbots.values()].filter((e) => e && e.sock && e.wasOpen).length : 0 } catch {}
         if (cover !== null) lines.push(`• Coverage: main bot is in ${cover} group(s), online sub-bots: ${subsOnline} — the automatic sweep rotates ALL of them`)
+        try {
+            const stats = globalThis.__fixkeysKeyStats
+            let hot = null
+            if (stats) {
+                const cutoff = Date.now() - 5 * 60 * 1000
+                for (const [k, rec] of stats.entries()) {
+                    const times = Array.isArray(rec) ? rec : (rec && rec.times) || []
+                    const recent = times.filter((t) => t >= cutoff).length
+                    if (recent && (!hot || recent > hot.n)) hot = { k, n: recent }
+                }
+            }
+            lines.push(hot ? `• Session churn (last 5 min): hottest ${hot.k} — ${hot.n} rebuild(s)${hot.n >= 10 ? ' ⚠️ flood peer — auto-repair handles it on its own' : ''}` : '• Session churn (last 5 min): quiet — no session rebuilds')
+            try {
+                const reps = (globalThis.__fixkeysAutoRepairs || []).filter((r) => Date.now() - r.at < 24 * 3600 * 1000)
+                const last = reps[reps.length - 1]
+                lines.push(`• Auto-repair of broken sessions: ${globalThis.__fixkeysAutoRepair === false ? 'OFF' : 'ON'} — ${reps.length} repair(s) in 24h${last ? ', last: ' + last.k + ' at ' + new Date(last.at).toLocaleTimeString() : ''}`)
+            } catch {}
+        } catch {}
         if (groupJid) {
             try {
                 const mem = await keys.get('sender-key-memory', [groupJid])
@@ -415,6 +524,7 @@ let handler = async (m, { conn, text, isOwner, usedPrefix, command }) => {
             `• ${usedPrefix + command} all — inside a group: reset + report members at risk\n` +
             `• ${usedPrefix + command} sweep — rotate the keys of ALL groups now (no restart)\n` +
             `• ${usedPrefix + command} auto on|off — the 12h self-maintenance (default on)\n` +
+            `• ${usedPrefix + command} repair on|off — auto-repair of looping member sessions (default on)\n` +
             `• ${usedPrefix + command} check — diagnostics\n` +
             `• ${usedPrefix + command} <groupJid> — reset a group from anywhere`
         )
@@ -448,5 +558,4 @@ handler.before = async function (m, { conn }) {
 handler.help = ['fixkeys']
 handler.tags = ['owner']
 handler.command = ['fixkeys']
-handler.owner = true
 export default handler
