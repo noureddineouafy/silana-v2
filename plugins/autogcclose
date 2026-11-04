@@ -1,7 +1,19 @@
 // ====================================================
-// 🔒 AUTO GROUP LOCK/UNLOCK
+// 🔒 AUTO GROUP LOCK/UNLOCK — v2 (rename fix)
 // instagram.com/noureddine_ouafy
-// Commands: .auto on | .auto off | .auto set HH:MM HH:MM | .auto status
+// Commands: .auto on | .auto off | .auto set HH:MM HH:MM | .auto status | .auto fix
+//
+// v2 fixes "the group opens but the name stays (❌ مغلق)":
+//  1) The stored base name is CLEANED of any (❌ مغلق)/(✅ مفتوح) suffix
+//     every time it is read — an old record that captured the name while
+//     the group was already renamed heals itself, so opening can never
+//     "restore" a name that still carries the closed suffix.
+//  2) Open and close are now symmetric: close → "name (❌ مغلق)",
+//     open → "name (✅ مفتوح)".
+//  3) Every step (setting / rename) has its own try/catch, the rename is
+//     VERIFIED by re-reading the group and retried once, and a per-minute
+//     repair pass fixes a drifted name on its own.
+//  4) .auto fix re-applies the current state (setting + name) right now.
 // ====================================================
 
 import fs from 'fs'
@@ -11,7 +23,6 @@ import schedule from 'node-schedule'
 const dbFile   = './autoGC.json'
 const timeZone = 'Africa/Casablanca'
 
-// ─── تحميل قاعدة البيانات ─────────────────────────────
 global.autoGC = global.autoGC || {}
 if (fs.existsSync(dbFile)) {
   try { global.autoGC = JSON.parse(fs.readFileSync(dbFile)) }
@@ -25,13 +36,49 @@ const saveDB = () => {
   catch (e) { console.error('[AutoGC] خطأ حفظ DB:', e); return false }
 }
 
-// ─── حساب الوقت بعد N دقيقة ──────────────────────────
+// ─── تنظيف الاسم الأساسي من أي لاحقة حالة ─────────────
+const SUFFIX_RE = /\s*\(\s*(❌\s*مغلق|✅\s*مفتوح)\s*\)\s*$/
+const cleanName = (name) => {
+  let n = String(name || '').trim()
+  while (SUFFIX_RE.test(n)) n = n.replace(SUFFIX_RE, '').trim()
+  return n || 'Group'
+}
+const nameFor = (base, status) => status === 'closed' ? `${base} (❌ مغلق)` : `${base} (✅ مفتوح)`
+
 const timeAfterMinutes = (timeStr, n) => {
   const [h, m] = timeStr.split(':').map(Number)
   const total  = h * 60 + m - n
   const hh     = Math.floor(((total % 1440) + 1440) % 1440 / 60)
   const mm     = ((total % 1440) + 1440) % 1440 % 60
   return `${String(hh).padStart(2,'0')}:${String(mm).padStart(2,'0')}`
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+// ─── تطبيق حالة (إعدادات + اسم) مع تحقق وإعادة محاولة ──
+async function applyState(conn, chatId, gc, target) {
+  const base = cleanName(gc.originalName)
+  gc.originalName = base
+  const wantName = nameFor(base, target)
+  let settingOk = false, nameOk = false
+
+  try {
+    await conn.groupSettingUpdate(chatId, target === 'closed' ? 'announcement' : 'not_announcement')
+    settingOk = true
+  } catch (e) { console.error(`[AutoGC] setting ${target} ${chatId}:`, e?.message || e) }
+
+  for (let attempt = 0; attempt < 2 && !nameOk; attempt++) {
+    try {
+      await conn.groupUpdateSubject(chatId, wantName)
+      const md = await conn.groupMetadata(chatId).catch(() => null)
+      nameOk = !md?.subject || md.subject === wantName
+      if (!nameOk && attempt === 0) await sleep(3000)
+    } catch (e) {
+      console.error(`[AutoGC] rename ${target} ${chatId} (try ${attempt + 1}):`, e?.message || e)
+      if (attempt === 0) await sleep(3000)
+    }
+  }
+  return { settingOk, nameOk, wantName }
 }
 
 // ─── فحص المجموعات كل دقيقة ──────────────────────────
@@ -45,9 +92,12 @@ const checkGroupsStatus = async () => {
     const gc = global.autoGC[chatId]
     if (!gc?.enabled) continue
 
+    // شفاء ذاتي: نظّف الاسم المخزّن إلا كان ملوثاً بلاحقة
+    const cleaned = cleanName(gc.originalName)
+    if (cleaned !== gc.originalName) { gc.originalName = cleaned; saveDB() }
+
     const { closeTime, openTime, originalName, status } = gc
 
-    // ── إشعار قبل الإغلاق بـ 2 دقيقة ──
     if (now === timeAfterMinutes(closeTime, 2) && gc.notifiedClose !== now) {
       gc.notifiedClose = now
       saveDB()
@@ -56,7 +106,6 @@ const checkGroupsStatus = async () => {
       }).catch(console.error)
     }
 
-    // ── إشعار قبل الفتح بـ 2 دقيقة ──
     if (now === timeAfterMinutes(openTime, 2) && gc.notifiedOpen !== now) {
       gc.notifiedOpen = now
       saveDB()
@@ -65,37 +114,52 @@ const checkGroupsStatus = async () => {
       }).catch(console.error)
     }
 
-    // ── إغلاق المجموعة ──
+    // ── إغلاق ──
     if (now === closeTime && status !== 'closed') {
-      try {
-        await conn.groupSettingUpdate(chatId, 'announcement')
-        await conn.groupUpdateSubject(chatId, `${originalName} (❌ مغلق)`)
-        await conn.sendMessage(chatId, {
-          text: `🔒 *تم إغلاق المجموعة*\n\nالوقت: *${now}*\n💤 سيتم إعادة فتحها في *${openTime}*\n\n_Powered by Silana AI_ 🤖`
-        })
-        global.autoGC[chatId].status = 'closed'
+      const r = await applyState(conn, chatId, gc, 'closed')
+      if (r.settingOk) {
+        gc.status = 'closed'
         saveDB()
-        console.log(`[AutoGC] 🔒 أُغلقت: ${chatId}`)
-      } catch (e) { console.error(`[AutoGC] خطأ إغلاق ${chatId}:`, e) }
+        await conn.sendMessage(chatId, {
+          text: `🔒 *تم إغلاق المجموعة*\n\nالوقت: *${now}*\n💤 سيتم إعادة فتحها في *${openTime}*` + (r.nameOk ? '' : '\n⚠️ تعذّر تحديث اسم المجموعة — تأكد أن البوت مشرف.') + `\n\n_Powered by Silana AI_ 🤖`
+        }).catch(console.error)
+        console.log(`[AutoGC] 🔒 أُغلقت: ${chatId} (name ${r.nameOk ? 'ok' : 'FAILED'})`)
+      }
+      continue
     }
 
-    // ── فتح المجموعة ──
+    // ── فتح ──
     if (now === openTime && status !== 'opened') {
-      try {
-        await conn.groupSettingUpdate(chatId, 'not_announcement')
-        await conn.groupUpdateSubject(chatId, originalName)
-        await conn.sendMessage(chatId, {
-          text: `✅ *تم فتح المجموعة*\n\nالوقت: *${now}*\n💬 يمكنكم المشاركة الآن\n🔒 وقت الإغلاق القادم: *${closeTime}*\n\n_Powered by Silana AI_ 🤖`
-        })
-        global.autoGC[chatId].status = 'opened'
+      const r = await applyState(conn, chatId, gc, 'opened')
+      if (r.settingOk) {
+        gc.status = 'opened'
         saveDB()
-        console.log(`[AutoGC] ✅ فُتحت: ${chatId}`)
-      } catch (e) { console.error(`[AutoGC] خطأ فتح ${chatId}:`, e) }
+        await conn.sendMessage(chatId, {
+          text: `✅ *تم فتح المجموعة*\n\nالوقت: *${now}*\n💬 يمكنكم المشاركة الآن\n🔒 وقت الإغلاق القادم: *${closeTime}*` + (r.nameOk ? '' : '\n⚠️ تعذّر تحديث اسم المجموعة — تأكد أن البوت مشرف.') + `\n\n_Powered by Silana AI_ 🤖`
+        }).catch(console.error)
+        console.log(`[AutoGC] ✅ فُتحت: ${chatId} (name ${r.nameOk ? 'ok' : 'FAILED'})`)
+      }
+      continue
+    }
+
+    // ── إصلاح انحراف الاسم (الاسم لا يطابق الحالة المسجلة) ──
+    if (status === 'closed' || status === 'opened') {
+      if (!gc.lastRepair || Date.now() - gc.lastRepair > 3600000) {
+        const md = conn.chats?.[chatId]?.metadata || await conn.groupMetadata(chatId).catch(() => null)
+        const want = nameFor(originalName, status)
+        if (md?.subject && md.subject !== want) {
+          gc.lastRepair = Date.now()
+          saveDB()
+          try {
+            await conn.groupUpdateSubject(chatId, want)
+            console.log(`[AutoGC] 🛠️ أُصلح اسم ${chatId} → ${want}`)
+          } catch (e) { console.error(`[AutoGC] repair rename ${chatId}:`, e?.message || e) }
+        }
+      }
     }
   }
 }
 
-// ─── تشغيل الجدولة مرة وحدة ──────────────────────────
 if (!global.autoGCSchedule) {
   global.autoGCSchedule = schedule.scheduleJob('* * * * *', () => {
     checkGroupsStatus().catch(console.error)
@@ -111,14 +175,13 @@ const handler = async (m, { conn, args }) => {
   const groupMetadata = conn.chats[chatId]?.metadata || await conn.groupMetadata(chatId)
   const sub           = args[0]?.toLowerCase()
 
-  // .auto on
   if (sub === 'on') {
     global.autoGC[chatId] = {
       enabled:      true,
       closeTime:    global.autoGC[chatId]?.closeTime || '22:00',
       openTime:     global.autoGC[chatId]?.openTime  || '10:00',
-      originalName: groupMetadata.subject,
-      status:       'opened'
+      originalName: cleanName(groupMetadata.subject),
+      status:       global.autoGC[chatId]?.status || 'opened'
     }
     return saveDB()
       ? m.reply(
@@ -130,21 +193,20 @@ const handler = async (m, { conn, args }) => {
       : m.reply('❌ فشل في حفظ الإعدادات.')
   }
 
-  // .auto off
   if (sub === 'off') {
     if (!global.autoGC[chatId]?.enabled) return m.reply('⚠️ الميزة معطلة بالفعل.')
     delete global.autoGC[chatId]
     return saveDB() ? m.reply('❌ تم *إلغاء* الإغلاق/الفتح التلقائي.') : m.reply('❌ فشل في الحفظ.')
   }
 
-  // .auto set 22:00 10:00
   if (sub === 'set') {
     if (!args[1] || !args[2])
       return m.reply('⚠️ مثال: *.auto set 22:00 10:00*\n_(الأول إغلاق، الثاني فتح)_')
     if (!/^([01]\d|2[0-3]):([0-5]\d)$/.test(args[1]) || !/^([01]\d|2[0-3]):([0-5]\d)$/.test(args[2]))
       return m.reply('⚠️ صيغة خاطئة! استخدم HH:MM بنظام 24 ساعة.')
 
-    if (!global.autoGC[chatId]) global.autoGC[chatId] = { originalName: groupMetadata.subject, status: 'opened' }
+    if (!global.autoGC[chatId]) global.autoGC[chatId] = { originalName: cleanName(groupMetadata.subject), status: 'opened' }
+    else global.autoGC[chatId].originalName = cleanName(global.autoGC[chatId].originalName || groupMetadata.subject)
     global.autoGC[chatId].enabled   = true
     global.autoGC[chatId].closeTime = args[1]
     global.autoGC[chatId].openTime  = args[2]
@@ -154,7 +216,20 @@ const handler = async (m, { conn, args }) => {
       : m.reply('❌ فشل في الحفظ.')
   }
 
-  // .auto status
+  // .auto fix — إعادة تطبيق الحالة الحالية (إعدادات + اسم) الآن
+  if (sub === 'fix') {
+    const gc = global.autoGC[chatId]
+    if (!gc?.enabled) return m.reply('⚠️ الميزة غير مفعلة في هذه المجموعة.')
+    const target = gc.status === 'closed' ? 'closed' : 'opened'
+    const r = await applyState(conn, chatId, gc, target)
+    saveDB()
+    return m.reply(
+      `🛠️ *إصلاح الحالة*\n\n` +
+      `الإعدادات: ${r.settingOk ? '✅' : '❌'}\n` +
+      `الاسم الآن: *${r.wantName}* ${r.nameOk ? '✅' : '❌ (تأكد أن البوت مشرف)'}`
+    )
+  }
+
   if (sub === 'status') {
     if (!global.autoGC[chatId]) return m.reply('⚠️ الميزة غير مفعلة في هذه المجموعة.')
     const { enabled, closeTime, openTime, status } = global.autoGC[chatId]
@@ -162,6 +237,7 @@ const handler = async (m, { conn, args }) => {
       `📊 *حالة التحكم التلقائي*\n\n` +
       `الحالة:    ${enabled ? '✅ مفعل' : '❌ معطل'}\n` +
       `المجموعة: ${status === 'closed' ? '🔒 مغلقة' : '🔓 مفتوحة'}\n` +
+      `الاسم الأساسي: *${cleanName(global.autoGC[chatId].originalName)}*\n` +
       `🔴 الإغلاق: *${closeTime}*\n` +
       `🟢 الفتح:   *${openTime}*\n\n` +
       `_التوقيت: ${timeZone}_`
@@ -173,7 +249,8 @@ const handler = async (m, { conn, args }) => {
     `*.auto on* — تفعيل\n` +
     `*.auto off* — إلغاء\n` +
     `*.auto set 22:00 10:00* — تعيين أوقات\n` +
-    `*.auto status* — عرض الحالة`
+    `*.auto status* — عرض الحالة\n` +
+    `*.auto fix* — إصلاح الاسم والحالة الآن`
   )
 }
 
