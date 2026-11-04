@@ -67,7 +67,7 @@ global.loadDatabase = function () {
     try {
       Object.assign(global.db.data, JSON.parse(_0x353954.data));
     } catch {
-      console.error("[DB] JSON rusak, reset database");
+      console.error("[DB] JSON corrupted, database reset");
     }
   } else {
     global.db.sqlite.prepare("INSERT OR IGNORE INTO database (id, data) VALUES (1, ?)").run(JSON.stringify(global.db.data));
@@ -142,7 +142,7 @@ async function connectionUpdate(_0x59fc6f) {
     isOnline: _0xcab0c2
   } = _0x59fc6f;
   if (_0x315415 === "connecting") {
-    console.log(_0x1d1cff.redBright("⚡ Mengaktifkan Bot, Mohon tunggu sebentar..."));
+    console.log(_0x1d1cff.redBright("⚡ Activating Bot, please wait a moment..."));
   }
   if (_0x315415 === "open") {
     console.log(_0x1d1cff.green("✅ Tersambung"));
@@ -187,7 +187,7 @@ async function connectionUpdate(_0x59fc6f) {
     console.log(_0x1d1cff.red("Status Mati"));
   }
   if (_0x3c2483) {
-    console.log(_0x1d1cff.yellow("Menunggu Pesan Baru"));
+    console.log(_0x1d1cff.yellow("Waiting for New Messages"));
   }
   const _0x33e8c8 = _0x1228d9?.error?.output;
   if (_0x33e8c8?.payload) {
@@ -247,14 +247,14 @@ global.reloadHandler = async function (_0x33ce52) {
     conn.ev.off("connection.update", conn.connectionUpdate);
     conn.ev.off("creds.update", conn.credsUpdate);
   }
-  conn.welcome = "✦━━━━━━[ *WELCOME* ]━━━━━━✦\n\n┏––––––━━━━━━━━•\n│⫹⫺ @subject\n┣━━━━━━━━┅┅┅\n│( 👋 Hallo @user)\n├[ *INTRO* ]—\n│ *Nama:* \n│ *Umur:* \n│ *Gender:*\n┗––––––━━┅┅┅\n\n––––––┅┅ *DESCRIPTION* ┅┅––––––\n@desc";
-  conn.bye = "✦━━━━━━[ *GOOD BYE* ]━━━━━━✦\nSayonara *@user* 👋( ╹▽╹ )";
-  conn.spromote = "@user sekarang admin!";
-  conn.sdemote = "@user sekarang bukan admin!";
-  conn.sDesc = "Deskripsi telah diubah ke \n@desc";
-  conn.sSubject = "Judul grup telah diubah ke \n@subject";
-  conn.sIcon = "Icon grup telah diubah!";
-  conn.sRevoke = "Link group telah diubah ke \n@revoke";
+  conn.welcome = "✦━━━━━━[ *WELCOME* ]━━━━━━✦\n\n┏––––––━━━━━━━━•\n│⫹⫺ @subject\n┣━━━━━━━━┅┅┅\n│( 👋 Hello @user)\n├[ *INTRO* ]—\n│ *Name:* \n│ *Age:* \n│ *Gender:*\n┗––––––━━┅┅┅\n\n––––––┅┅ *DESCRIPTION* ┅┅––––––\n@desc";
+  conn.bye = "✦━━━━━━[ *GOOD BYE* ]━━━━━━✦\nGoodbye *@user* 👋( ╹▽╹ )";
+  conn.spromote = "@user is now an admin!";
+  conn.sdemote = "@user is no longer an admin!";
+  conn.sDesc = "Description has been changed to \n@desc";
+  conn.sSubject = "Group title has been changed to \n@subject";
+  conn.sIcon = "Group icon has been changed!";
+  conn.sRevoke = "Group link has been changed to \n@revoke";
   conn.handler = handler.handler.bind(global.conn);
   conn.participantsUpdate = handler.participantsUpdate.bind(global.conn);
   conn.groupsUpdate = handler.groupsUpdate.bind(global.conn);
@@ -271,7 +271,7 @@ global.reloadHandler = async function (_0x33ce52) {
       const _0x15478b = global.db.data.settings[conn.user.jid];
       if (_0x3e275c === "offer" && _0x15478b.anticall) {
         await conn.rejectCall(_0x59b7b0, _0x28bc6e);
-        console.log("Menolak panggilan dari", _0x28bc6e);
+        console.log("Rejecting call from", _0x28bc6e);
       }
     }
   });
@@ -393,7 +393,7 @@ script[_0xc1fccc(172)] = [_0xc1fccc(162)];
 script[_0xc1fccc(192)] = ["sc", _0xc1fccc(157), _0xc1fccc(199)];
 global[_0xc1fccc(152)][_0xc1fccc(222) + _0xc1fccc(227)] = script;
 function _0x5252() {
-  const _0x411fc8 = ["html_url", "gusXzz/Chi", " jam yang ", "Coba lagi ", "name", " hari yang", "created_at", "112JKHAtA", "XVciz", "kueFX", "ir publish", "g lalu", "MXJPj", "apatkan In", "255928xagcCR", ":* ", "QlAgM", "reply", "https://ap", "iMD", "__Sc__By__", "\n🚀 *Terakh", " lalu", "Gagal Mend", " detik yan", "AgusXzz__", "185349XdquOm", "146364mHUXLm", " menit yan", "JXwHl", "json", "\n⭐ *Star:*", "plugins", "updated_at", "lalu", "\n🍴 *Forks:", "k:* ", "script", "*Informasi", "pushed_at", "14237325JOhDJJ", "1230800AYOktl", "info", "forks", " sejak:* ", "om/repos/A", " tahun yan", "ryWjw", "nanti.", "zsfMd", "2PwIRxW", "2780220hARUmo", "tags", "now", "FFbRv", "getTime", "help", "stargazers", "error", "2109624yDrmdC", "✨ *Nama:* ", "fo Reposit", "i.github.c", "\n👤 *Pemili", "GNNrl", " bulan yan", "floor", "owner", "_count", "IMXHo", "gHbyk", "ory", "command", "\n♻️ *Terakh", "login", "bxwHI", "\n🔗 *Link:*", " Script*\n\n", "rwQoK", "esce", "\n📅 *Dibuat", "ir update:"];
+  const _0x411fc8 = ["html_url", "oureddineo", " hours ag", "Try again ", "name", " days ag", "created_at", "112JKHAtA", "XVciz", "kueFX", " published", "go", "MXJPj", "fetch repo", "255928xagcCR", ":* ", "QlAgM", "reply", "https://ap", "uafy/silana-v2", "__Sc__By__", "\n🚀 *Last", "o", "Failed to ", " seconds a", "AgusXzz__", "185349XdquOm", "146364mHUXLm", " minutes a", "JXwHl", "json", "\n⭐ *Star:*", "plugins", "updated_at", "o", "\n🍴 *Forks:", ":* ", "script", "*Script", "pushed_at", "14237325JOhDJJ", "1230800AYOktl", "info", "forks", ":* ", "om/repos/n", " years a", "ryWjw", "later.", "zsfMd", "2PwIRxW", "2780220hARUmo", "tags", "now", "FFbRv", "getTime", "help", "stargazers", "error", "2109624yDrmdC", "✨ *Name:* ", "sitory inf", "i.github.c", "\n👤 *Owner", "GNNrl", " months a", "floor", "owner", "_count", "IMXHo", "gHbyk", "o", "command", "\n♻️ *Last", "login", "bxwHI", "\n🔗 *Link:*", " Information*\n\n", "rwQoK", "esce", "\n📅 *Created", " update:"];
   _0x5252 = function () {
     return _0x411fc8;
   };
