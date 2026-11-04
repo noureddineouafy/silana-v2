@@ -1,7 +1,7 @@
 /**
  * dlpack.js — Multi-platform downloader pack for Silana v2 (ChiiMD base, Baileys ESM)
  *
- * One plugin, twelve downloaders — every command starts with "dl-":
+ * One plugin, nineteen downloaders — every command starts with "dl-":
  *   .dl           → menu of the pack (with a working example for each command)
  *   .dl-reddit    <reddit post link | v.redd.it link>   video (audio merged), images, gifs
  *   .dl-sc        <soundcloud track link>               MP3 audio
@@ -15,6 +15,27 @@
  *   .dl-pin       <pinterest pin link>                  photo or video of the pin
  *   .dl-mf        <mediafire file link>                 any public file
  *   .dl-st        <streamtape video link>               video
+ *   .dl-x         <x/twitter post link>                 video or photo of the post
+ *   .dl-pd        <pixeldrain link>                     any public file
+ *   .dl-tb        <terabox share link>                  files from public shares
+ *   .dl-fb        <facebook video link>                 public videos and reels
+ *   .dl-lk        <likee video link>                    video
+ *   .dl-gf        <gofile share link>                   any public file
+ *   .dl-wt        <wetransfer link>                     the transfer file (usually a zip)
+ *
+ * v6 (2026-11-04) added Likee, Doodstream, Filemoon, Gofile and WeTransfer.
+ * v6.1 (same day): Doodstream and Filemoon were REMOVED — both live-confirmed
+ * dead on the panel too (Doodstream: HTTP 403 for the hosting IP + a
+ * Cloudflare Turnstile captcha in front of the player; Filemoon: rebuilt as
+ * the "Byse" JS app, streams only via premium API keys). Gofile was FIXED:
+ * its guest API wants the website-token as an X-Website-Token HEADER (its own
+ * frontend's services/contents.js shows the exact call) — as a ?wt= query
+ * parameter the API answers error-notPremium. WeTransfer's API route is
+ * verified (expired links return the API's own structured errors). Likee is
+ * still awaiting a real video link to test with.
+ * v6.2 (same day): the Gofile menu example is now a tiny test clip uploaded
+ * for this pack (silana-dl-test.mp4) — test examples must always be files
+ * whose content is known and clean, never random public uploads.
  *
  * v3: Dailymotion and Bilibili were REMOVED — both platforms hard-block
  * server IPs (DM stream CDN 403, Bilibili anti-bot 412), confirmed live.
@@ -515,6 +536,217 @@ async function dlSt(conn, m, url) {
     return sendByType(conn, m, out, 'video/mp4', '🎬 ' + title)
 }
 
+/* ---------------- X / Twitter ---------------- */
+
+async function dlX(conn, m, url) {
+    const mm = url.match(/(?:x|twitter)\.com\/([^/]+)\/status\/(\d+)/i)
+    if (!mm) throw new Error('bad-link: not an X/Twitter post link')
+    let media = [], text = ''
+    try {
+        const j = await (await fetch(`https://api.fxtwitter.com/${mm[1]}/status/${mm[2]}`, { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(30000) })).json()
+        if (j?.code === 200 && j.tweet) { text = j.tweet.text || ''; media = (j.tweet.media?.all || []).map(x => ({ type: x.type, url: x.url })) }
+    } catch {}
+    if (!media.length) {
+        const j = await (await fetch(`https://api.vxtwitter.com/${mm[1]}/status/${mm[2]}`, { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(30000) })).json().catch(() => null)
+        if (j) { text = text || j.text || ''; media = (j.media_extended || []).map(x => ({ type: x.type, url: x.url })) }
+    }
+    if (!media.length) throw new Error('x: this post has no downloadable media (or it is private/deleted)')
+    const title = cleanName(text, 'X post')
+    const vid = media.find(x => (x.type === 'video' || x.type === 'gif') && /\.mp4/.test(x.url || ''))
+    if (vid) {
+        const out = path.join(TMPDIR, `x-${stamp()}.mp4`)
+        await downloadToFile(vid.url, out)
+        return sendByType(conn, m, out, 'video/mp4', '🐦 ' + title)
+    }
+    const photo = media.find(x => x.type === 'photo' && x.url)
+    if (photo) {
+        const out = path.join(TMPDIR, `x-${stamp()}` + (path.extname(new URL(photo.url).pathname) || '.jpg'))
+        await downloadToFile(photo.url, out)
+        return sendByType(conn, m, out, 'image/jpeg', '🐦 ' + title)
+    }
+    throw new Error('x: no video or photo found in this post')
+}
+
+/* ---------------- Pixeldrain ---------------- */
+
+async function dlPd(conn, m, url) {
+    const lm = url.match(/pixeldrain\.com\/l\/([A-Za-z0-9]+)/)
+    const fm = url.match(/pixeldrain\.com\/u\/([A-Za-z0-9]+)/)
+    if (!lm && !fm) throw new Error('bad-link: not a Pixeldrain link')
+    let id, name = '', size = 0, mime = ''
+    if (lm) {
+        const j = await (await fetch('https://pixeldrain.com/api/list/' + lm[1], { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(30000) })).json().catch(() => null)
+        const files = (j?.files || []).filter(f => f.id)
+        if (!files.length) throw new Error('pixeldrain: list is empty or not public')
+        files.sort((a, b) => (b.size || 0) - (a.size || 0))
+        const f = files[0]
+        id = f.id; name = f.name || ''; size = f.size || 0; mime = f.mime_type || ''
+        if (files.length > 1) name = name + `  (+${files.length - 1} more in the list — largest sent)`
+    } else {
+        id = fm[1]
+        const j = await (await fetch('https://pixeldrain.com/api/file/' + id + '/info', { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(30000) })).json().catch(() => null)
+        if (!j?.success) throw new Error('pixeldrain: file not found (deleted or private)')
+        name = j.name || ''; size = j.size || 0; mime = j.mime_type || ''
+    }
+    if (size > MAX_BYTES) throw new Error(`file too large (${(size / 1048576).toFixed(0)} MB, cap 95 MB)`)
+    name = cleanName(name, 'Pixeldrain file')
+    const ext = path.extname(name).toLowerCase()
+    const tmp = path.join(TMPDIR, `pd-${stamp()}.bin`)
+    await downloadToFile('https://pixeldrain.com/api/file/' + id + '?download', tmp)
+    const target = path.join(TMPDIR, name)
+    fs.renameSync(tmp, target)
+    return sendByType(conn, m, target, mime || MF_MIME[ext] || 'application/octet-stream', '📦 ' + name)
+}
+
+/* ---------------- Terabox ---------------- */
+
+async function dlTb(conn, m, url) {
+    const surl = url.match(/[?&]surl=([A-Za-z0-9_-]+)/)?.[1] || url.match(/\/s\/1?([A-Za-z0-9_-]{10,})/)?.[1]
+    if (!surl || !/terabox|1024tera|mirrobox|nephobox|freeterabox|terashare|momerybox|gibibox|tibibox|4funbox/i.test(url)) throw new Error('bad-link: not a Terabox share link')
+    const base = 'https://www.terabox.com'
+    const pageRes = await fetch(base + '/s/1' + surl, { headers: { 'User-Agent': UA }, redirect: 'follow', signal: AbortSignal.timeout(30000) })
+    const cookie = (pageRes.headers.getSetCookie ? pageRes.headers.getSetCookie() : []).map(c => c.split(';')[0]).join('; ')
+    const html = await pageRes.text()
+    const jsToken = html.match(/window\.jsToken\s*=\s*'([^']+)'/)?.[1] || html.match(/"jsToken"\s*:\s*"([^"]+)"/)?.[1] || ''
+    const listUrl = `${base}/share/list?app_id=250528&web=1&channel=chunlei&clienttype=0&shorturl=${surl}&page=1&num=20&order=name` + (jsToken ? '&jsToken=' + encodeURIComponent(jsToken) : '')
+    const j = await (await fetch(listUrl, { headers: { 'User-Agent': UA, 'Cookie': cookie, 'Referer': base + '/s/1' + surl }, signal: AbortSignal.timeout(30000) })).json().catch(() => null)
+    if (!j) throw new Error('terabox: no answer from the share API (blocked or down)')
+    if (j.errno === -9 || j.errno === -12) throw new Error('terabox: this share needs an extraction code — password shares are not supported')
+    if (j.errno !== 0) throw new Error('terabox: share refused (errno ' + j.errno + ' — deleted, expired, or login-walled)')
+    const files = (j.list || []).filter(f => !+f.isdir && f.dlink)
+    if (!files.length) throw new Error('terabox: no downloadable file in this share (folder of folders, or login wall)')
+    files.sort((a, b) => (+b.size || 0) - (+a.size || 0))
+    const f = files[0]
+    if (+f.size > MAX_BYTES) throw new Error(`file too large (${(+f.size / 1048576).toFixed(0)} MB, cap 95 MB)`)
+    const fname = cleanName(f.server_filename, 'Terabox file')
+    const ext = path.extname(fname).toLowerCase()
+    const tmp = path.join(TMPDIR, `tb-${stamp()}.bin`)
+    await downloadToFile(f.dlink, tmp, { 'Cookie': cookie, 'Referer': base + '/' })
+    const target = path.join(TMPDIR, fname)
+    fs.renameSync(tmp, target)
+    const note = files.length > 1 ? `  (+${files.length - 1} more in the share — largest sent)` : ''
+    return sendByType(conn, m, target, MF_MIME[ext] || 'application/octet-stream', '☁️ ' + fname + note)
+}
+
+/* ---------------- Facebook (public videos via the official embed player) ---------------- */
+
+async function dlFb(conn, m, url) {
+    if (!/facebook\.com|fb\.watch/i.test(url)) throw new Error('bad-link: not a Facebook link')
+    const embed = 'https://www.facebook.com/plugins/video.php?href=' + encodeURIComponent(url) + '&show_text=false&width=720'
+    const r = await fetch(embed, { headers: { 'User-Agent': UA }, redirect: 'follow', signal: AbortSignal.timeout(30000) })
+    if (!r.ok) throw new Error('facebook embed HTTP ' + r.status)
+    const html = (await r.text()).replace(/\\\//g, '/').replace(/\\u0026/g, '&')
+    const hd = html.match(/"browser_native_hd_url"\s*:\s*"([^"]+)"/)?.[1]
+    const sd = html.match(/"browser_native_sd_url"\s*:\s*"([^"]+)"/)?.[1]
+    const any = html.match(/https:\/\/video-[^"'\s]+\.mp4[^"'\s]*/)?.[0]
+    const src = hd || sd || any
+    if (!src && /\/share\/|fb\.watch/i.test(url)) throw new Error('facebook: share links hide the video — send the direct link instead (open the video, copy the watch/reel link)')
+    if (!src) throw new Error('facebook: no video source in the embed page (private video, or this server is walled)')
+    const out = path.join(TMPDIR, `fb-${stamp()}.mp4`)
+    await downloadToFile(src, out)
+    return sendByType(conn, m, out, 'video/mp4', '📘 Facebook video — via Silana DL Pack')
+}
+
+/* ---------------- Likee ---------------- */
+
+async function dlLk(conn, m, url) {
+    if (!/likee\.video|like\.video|likee\.com|l\.likee/i.test(url)) throw new Error('bad-link: not a Likee link')
+    const r = await fetch(url, { headers: { 'User-Agent': UA }, redirect: 'follow', signal: AbortSignal.timeout(30000) })
+    if (!r.ok) throw new Error('likee: page refused (HTTP ' + r.status + ')')
+    const html = (await r.text()).replace(/\\\//g, '/').replace(/\\u002F/g, '/')
+    // A dead short link lands on the Likee home page — that is not a video.
+    if (/^https?:\/\/(www\.)?likee\.video\/?$/.test(r.url || '')) throw new Error('likee: this link no longer leads to a video (expired share link?)')
+    let src = html.match(/property="og:video(?::secure_url)?" content="([^"]+)"/)?.[1]
+        || html.match(/"video_url"\s*:\s*"([^"]+)"/)?.[1]
+        || html.match(/"videoUrl"\s*:\s*"([^"]+)"/)?.[1]
+        || html.match(/"ori_video_url"\s*:\s*"([^"]+)"/)?.[1]
+    if (!src) {
+        const mp4s = [...new Set([...html.matchAll(/https:[^"' ]+?\.mp4[^"' ]*/g)].map(x => x[0]))].filter(u => !/sprite|thumb|cover|avatar/i.test(u))
+        src = mp4s.sort((a, b) => b.length - a.length)[0]
+    }
+    if (!src) throw new Error('likee: no video source found on the page (deleted/private video, or Likee changed its player)')
+    const title = cleanName(html.match(/property="og:title" content="([^"]+)"/)?.[1], 'Likee video')
+    const out = path.join(TMPDIR, `lk-${stamp()}.mp4`)
+    await downloadToFile(src, out, { Referer: 'https://likee.video/' })
+    return sendByType(conn, m, out, 'video/mp4', '🎵 ' + title + ' — via Silana DL Pack')
+}
+
+/* ---------------- Gofile ---------------- */
+
+let gfCache = { token: '', wt: '', at: 0 }
+
+async function gofileWt(token) {
+    // Gofile's "wt" website-token is computed by an obfuscated script the
+    // site itself ships (gofile.io/js/wt.obf.js, exposing generateWT(token)).
+    // Run the site's own script in a sandbox, exactly like a browser does.
+    const { runInNewContext } = await import('vm')
+    const code = await (await fetch('https://gofile.io/js/wt.obf.js', { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(30000) })).text()
+    const sandbox = { navigator: { userAgent: UA, language: 'en-US' }, location: { href: 'https://gofile.io/', hostname: 'gofile.io', origin: 'https://gofile.io', pathname: '/' }, document: { cookie: '', createElement: () => ({ style: {}, setAttribute: () => {} }), getElementById: () => null, querySelector: () => null, querySelectorAll: () => [], addEventListener: () => {}, head: { appendChild: () => {} }, body: { appendChild: () => {} } }, setTimeout: () => 0, clearTimeout: () => {}, setInterval: () => 0, console: { log: () => {}, warn: () => {}, error: () => {} } }
+    sandbox.window = sandbox; sandbox.self = sandbox; sandbox.globalThis = sandbox
+    runInNewContext(code, sandbox, { timeout: 5000 })
+    if (typeof sandbox.generateWT !== 'function') throw new Error('gofile: the wt script changed shape')
+    const wt = sandbox.generateWT(token)
+    return String((wt && wt.then) ? await wt : wt)
+}
+
+async function dlGf(conn, m, url) {
+    const idm = url.match(/gofile\.io\/d\/([A-Za-z0-9_-]+)/)
+    if (!idm) throw new Error('bad-link: not a Gofile link')
+    if (!gfCache.token || Date.now() - gfCache.at > 10 * 60 * 1000) {
+        const acc = await (await fetch('https://api.gofile.io/accounts', { method: 'POST', headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(30000) })).json().catch(() => null)
+        if (!acc?.data?.token) throw new Error('gofile: could not open a guest session')
+        gfCache = { token: acc.data.token, wt: '', at: Date.now() }
+    }
+    if (!gfCache.wt) gfCache.wt = await gofileWt(gfCache.token)
+    // The website-token travels as an X-Website-Token HEADER — as a ?wt=
+    // query parameter the API ignores it and answers error-notPremium.
+    // (Request shape taken from Gofile's own frontend, services/contents.js.)
+    const gfQuery = 'page=1&pageSize=100&sortField=name&sortDirection=1'
+    const j = await (await fetch(`https://api.gofile.io/contents/${idm[1]}?${gfQuery}`, { headers: { 'User-Agent': UA, Authorization: 'Bearer ' + gfCache.token, 'X-Website-Token': gfCache.wt, 'X-BL': 'en-US' }, signal: AbortSignal.timeout(30000) })).json().catch(() => null)
+    if (!j) throw new Error('gofile: no answer from the API')
+    if (j.status !== 'ok') throw new Error('gofile: API refused (' + (j.status || 'unknown') + ') — the share is private, or Gofile is restricting guest API access right now')
+    const box = j.data?.children || j.data?.contents || {}
+    let files = Object.values(box).filter(f => f && f.link && (f.type === 'file' || !f.children))
+    if (!files.length && j.data?.link) files = [j.data] // single-file share: the content itself is the file
+    if (!files.length) throw new Error('gofile: no downloadable file in this share')
+    files.sort((a, b) => (b.size || 0) - (a.size || 0))
+    const f = files[0]
+    if (f.size > MAX_BYTES) throw new Error(`file too large (${(f.size / 1048576).toFixed(0)} MB, cap 95 MB)`)
+    const fname = cleanName(f.name, 'Gofile file')
+    const ext = path.extname(fname).toLowerCase()
+    const tmp = path.join(TMPDIR, `gf-${stamp()}.bin`)
+    await downloadToFile(f.link, tmp, { Cookie: 'accountToken=' + gfCache.token })
+    const target = path.join(TMPDIR, fname)
+    fs.renameSync(tmp, target)
+    const note = files.length > 1 ? `  (+${files.length - 1} more in the share — largest sent)` : ''
+    return sendByType(conn, m, target, f.mimetype || MF_MIME[ext] || 'application/octet-stream', '📁 ' + fname + note)
+}
+
+/* ---------------- WeTransfer ---------------- */
+
+async function dlWt(conn, m, url) {
+    let id = '', hash = ''
+    const full = url.match(/wetransfer\.com\/downloads\/([0-9a-f]+)\/([0-9a-f]+)/i)
+    if (full) { id = full[1]; hash = full[2] }
+    else if (/we\.tl\//i.test(url)) {
+        const r = await fetch(url, { headers: { 'User-Agent': UA }, redirect: 'follow', signal: AbortSignal.timeout(30000) })
+        const mm = (r.url || '').match(/wetransfer\.com\/downloads\/([0-9a-f]+)\/([0-9a-f]+)/i)
+        if (!mm) throw new Error('wetransfer: this short link did not lead to a download page (expired?)')
+        id = mm[1]; hash = mm[2]
+    } else throw new Error('bad-link: not a WeTransfer link')
+    const r = await fetch(`https://wetransfer.com/api/v4/transfers/${id}/download`, { method: 'POST', headers: { 'User-Agent': UA, 'Content-Type': 'application/json', 'x-requested-with': 'XMLHttpRequest' }, body: JSON.stringify({ security_hash: hash, intent: 'entire_transfer' }), signal: AbortSignal.timeout(30000) })
+    const j = await r.json().catch(() => null)
+    if (!j?.direct_link) throw new Error('wetransfer: no download link back (' + (j?.message || 'HTTP ' + r.status) + ') — WeTransfer links expire after a few days')
+    const fromUrl = decodeURIComponent(new URL(j.direct_link).pathname.split('/').pop() || '')
+    const fname = cleanName(j.recommended_filename || fromUrl, 'wetransfer.zip')
+    const ext = path.extname(fname).toLowerCase()
+    const tmp = path.join(TMPDIR, `wt-${stamp()}.bin`)
+    await downloadToFile(j.direct_link, tmp)
+    const target = path.join(TMPDIR, fname)
+    fs.renameSync(tmp, target)
+    return sendByType(conn, m, target, MF_MIME[ext] || 'application/octet-stream', '💧 ' + fname + ' — via WeTransfer')
+}
+
 /* ---------------- Handler ---------------- */
 
 const SOURCES = {
@@ -530,6 +762,13 @@ const SOURCES = {
     'dl-pin': { fn: dlPin, label: 'Pinterest', need: 'a Pinterest pin link (photo or video)', example: 'https://www.pinterest.com/pin/baby-video--17099673581133973/' },
     'dl-mf': { fn: dlMf, label: 'MediaFire', need: 'a MediaFire file link', example: 'https://www.mediafire.com/file/4ba0oemf7sd39k9/UQMG_JTW_Sample_MissionPack_2.zip/file' },
     'dl-st': { fn: dlSt, label: 'Streamtape', need: 'a Streamtape video link', example: 'https://streamtape.com/v/m7XGwwGRM6HbK9Y/VID-20251205-WA0067.mp4' },
+    'dl-x': { fn: dlX, label: 'X (Twitter)', need: 'an X/Twitter post link', example: 'https://x.com/AbdulElSayed/status/2115065692751872212' },
+    'dl-pd': { fn: dlPd, label: 'Pixeldrain', need: 'a Pixeldrain file link', example: 'https://pixeldrain.com/u/8o4XMJhw' },
+    'dl-tb': { fn: dlTb, label: 'Terabox', need: 'a Terabox share link', example: null },
+    'dl-fb': { fn: dlFb, label: 'Facebook', need: 'a public Facebook video/reel link', example: 'https://www.facebook.com/watch/?v=1160678223584230' },
+    'dl-lk': { fn: dlLk, label: 'Likee', need: 'a Likee video link', example: null },
+    'dl-gf': { fn: dlGf, label: 'Gofile', need: 'a Gofile share link', example: 'https://gofile.io/d/sbHH5OKM' },
+    'dl-wt': { fn: dlWt, label: 'WeTransfer', need: 'a WeTransfer link (we.tl or wetransfer.com/downloads)', example: null },
 }
 
 // Busy lock per user, with a 10-minute expiry so a hung job can never
@@ -551,7 +790,7 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
         const names = Object.values(SOURCES).map(s => s.label)
         const nameList = names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1]
         return conn.reply(m.chat,
-            `📥 *Silana DL Pack* v4.1\n` +
+            `📥 *Silana DL Pack* v6.2\n` +
             `With these commands you can download from ${names.length} platforms: ${nameList}.\n\n` +
             `Every command below has a working example — copy it to test the feature yourself:\n\n` +
             lines + `\n\nMax file size: 95 MB.`, m)
@@ -580,7 +819,7 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
         else if (raw.includes('gdrive:')) friendly = '❌ ' + raw + ' Make sure the file is shared as "Anyone with the link".'
         else if (raw.includes('telegram:')) friendly = '❌ ' + raw
         else if (raw.includes('soundcloud:')) friendly = '❌ ' + raw
-        else if (/^(vimeo|twitch|streamable|kwai|rumble|pinterest|mediafire|streamtape):/.test(raw)) friendly = '❌ ' + raw
+        else if (/^(vimeo|twitch|streamable|kwai|rumble|pinterest|mediafire|streamtape|x|pixeldrain|terabox|facebook|likee|gofile|wetransfer):/.test(raw)) friendly = '❌ ' + raw
         return conn.reply(m.chat, friendly + (isOwner ? `\n🔧 Owner details: ${raw.slice(0, 180)}` : ''), m)
     } finally {
         busyUsers.delete(m.sender)
@@ -589,9 +828,9 @@ let handler = async (m, { conn, text, usedPrefix, command, isOwner }) => {
     }
 }
 
-handler.help = ['dl', 'dl-reddit', 'dl-sc', 'dl-gdrive', 'dl-tg', 'dl-vimeo', 'dl-twitch', 'dl-streamable', 'dl-kwai', 'dl-rumble', 'dl-pin', 'dl-mf', 'dl-st']
+handler.help = ['dl', 'dl-reddit', 'dl-sc', 'dl-gdrive', 'dl-tg', 'dl-vimeo', 'dl-twitch', 'dl-streamable', 'dl-kwai', 'dl-rumble', 'dl-pin', 'dl-mf', 'dl-st', 'dl-x', 'dl-pd', 'dl-tb', 'dl-fb', 'dl-lk', 'dl-gf', 'dl-wt']
 handler.tags = ['downloader']
-handler.command = /^(dl|dl-reddit|dl-sc|dl-gdrive|dl-tg|dl-vimeo|dl-twitch|dl-streamable|dl-kwai|dl-rumble|dl-pin|dl-mf|dl-st)$/i
+handler.command = /^(dl|dl-reddit|dl-sc|dl-gdrive|dl-tg|dl-vimeo|dl-twitch|dl-streamable|dl-kwai|dl-rumble|dl-pin|dl-mf|dl-st|dl-x|dl-pd|dl-tb|dl-fb|dl-lk|dl-gf|dl-wt)$/i
 handler.limit = false
 
 export default handler
