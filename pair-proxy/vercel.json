@@ -1,0 +1,5 @@
+{
+  "rewrites": [
+    { "source": "/(.*)", "destination": "http://panel.slowdy.tech:25565/$1" }
+  ]
+}
