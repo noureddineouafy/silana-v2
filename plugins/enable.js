@@ -24,6 +24,11 @@ let handler = async (m, { conn, usedPrefix, command, args, isOwner, isAdmin }) =
 			chat.delete = isEnable;
 			break;
 
+		case 'antilink':
+			if (m.isGroup && !(isAdmin || isOwner)) return global.dfail('admin', m, conn);
+			chat.antiLink = isEnable;
+			break;
+
 		case 'autolevelup':
 			isUser = true;
 			user.autolevelup = isEnable;
@@ -67,6 +72,7 @@ let handler = async (m, { conn, usedPrefix, command, args, isOwner, isAdmin }) =
 - welcome
 - detect
 - antidelete
+- antilink
 ${
 	isOwner
 		? `
