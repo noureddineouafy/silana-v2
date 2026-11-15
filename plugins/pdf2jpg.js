@@ -1,3 +1,4 @@
+
 import axios from 'axios';
 import FormData from 'form-data';
 import fs from 'fs';
@@ -193,32 +194,8 @@ async function pdfToJpg(
   await downloadResult(server, task, token, outputPath);
 }
 
-handler.help = [
-  'pdf2jpg',
-  '',
-  '📄 PDF to JPG Converter',
-  '',
-  'Convert every page of a PDF into separate JPG images.',
-  '',
-  'Features:',
-  '• Converts all PDF pages',
-  '• High-quality output (300 DPI)',
-  '• Returns a ZIP archive',
-  '',
-  'How to use:',
-  '1. Reply to a PDF document with the command.',
-  '2. Or provide a local PDF file path.',
-  '',
-  'Examples:',
-  '.pdf2jpg',
-  '.pdf2jpg ./tmp/report.pdf',
-  '',
-  'Output:',
-  '• ZIP file containing JPG images'
-].join('\n');
-
+handler.help = ['pdf2jpg']
 handler.command = ['pdf2jpg'];
 handler.tags = ['tools'];
 handler.limit = false;
-
 export default handler;
