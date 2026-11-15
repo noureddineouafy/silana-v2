@@ -262,35 +262,9 @@ ${e.message || e}`
   }
 }
 
-handler.help = [
-  'qwenedit',
-  '',
-  '🖼️ Qwen AI Image Editor',
-  '',
-  'Edit an image using advanced AI models.',
-  '',
-  'Available Models:',
-  '• add - Add new objects',
-  '• remove - Remove objects',
-  '• remove2 - Improved object removal',
-  '• zoom - Enhance and zoom the image',
-  '• outfit - Extract clothing',
-  '• layout - Generate outfit layouts',
-  '',
-  'How to use:',
-  '1. Reply to an image.',
-  '2. Use:',
-  '.qwenedit add|Add sunglasses',
-  '',
-  'Example:',
-  '.qwenedit remove|Remove the chair',
-  '',
-  'Output:',
-  '• AI-edited image'
-].join('\n')
-
+handler.help = ['qwenedit']
 handler.command = ['qwenedit']
 handler.tags = ['editor']
 handler.limit = false
-
 export default handler
+                         
