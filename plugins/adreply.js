@@ -263,13 +263,22 @@ function bodyOf(conn) {
     return (s && typeof s.adreplyBody === 'string' && s.adreplyBody) ? s.adreplyBody : AD_BODY
 }
 
+function safeAssign(obj, key, value) {
+    // Some conn methods (e.g. 'reply', 'sendMessage' from lib/simple.js) may be
+    // defined read-only / non-configurable. Never let patching crash a command:
+    // try plain assignment, then defineProperty, then give up silently.
+    try { obj[key] = value; if (obj[key] === value) return true } catch (e) {}
+    try {
+        Object.defineProperty(obj, key, { value: value, writable: true, configurable: true, enumerable: true })
+        return obj[key] === value
+    } catch (e) { return false }
+}
+
 function patchConn(conn) {
     if (!conn || typeof conn.sendMessage !== 'function') return
     if (!conn.__adreplyV11) {
-        conn.__adreplyV11 = true
         var originalSend = conn.sendMessage.bind(conn)
-        conn.__adreplyRawSend = originalSend
-        conn.sendMessage = async function (jid, content, opts) {
+        var patchedSend = async function (jid, content, opts) {
             if (shouldWrapContent(conn, jid, content)) {
                 try {
                     var card = await sendCard(conn, jid, content.text, opts && opts.quoted, contentMentions(content))
@@ -279,12 +288,16 @@ function patchConn(conn) {
             }
             return originalSend(jid, content, opts)
         }
+        if (safeAssign(conn, 'sendMessage', patchedSend)) {
+            conn.__adreplyV11 = true
+            try { conn.__adreplyRawSend = originalSend } catch (e) {}
+        } else {
+            conn.__adreplyV11 = 'failed'
+        }
     }
     if (typeof conn.reply === 'function' && !conn.__adreplyV11Reply) {
-        conn.__adreplyV11Reply = true
         var originalReply = conn.reply.bind(conn)
-        conn.__adreplyRawReply = originalReply
-        conn.reply = async function (jid, text, quoted, options) {
+        var patchedReply = async function (jid, text, quoted, options) {
             var optsHasText = options && typeof options === 'object' && typeof options.text === 'string'
             if (typeof text === 'string' && text.length && !optsHasText && wrapTargetOk(conn, jid) && text.indexOf(AD_SOURCE) === -1) {
                 try {
@@ -294,6 +307,12 @@ function patchConn(conn) {
                 state.skipped++
             }
             return originalReply(jid, text, quoted, options)
+        }
+        if (safeAssign(conn, 'reply', patchedReply)) {
+            conn.__adreplyV11Reply = true
+            try { conn.__adreplyRawReply = originalReply } catch (e) {}
+        } else {
+            conn.__adreplyV11Reply = 'failed'
         }
     }
 }
