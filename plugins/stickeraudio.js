@@ -582,7 +582,7 @@ let handler = async (m, { conn, usedPrefix }) => {
 }
 
 handler.help = ['stickeraudio']
-handler.tags = ['tools']
+handler.tags = ['sticker']
 handler.command = ['stickeraudio']
 handler.limit = false
 
